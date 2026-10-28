@@ -1,0 +1,28 @@
+{
+  // Local Wrangler preview: same worker bundle, assets and bindings as the
+  // deployed preview environment (D1 is isolated, auth uses the development client).
+  "name": "elimutrack-local",
+  "main": "dist-worker/index.js",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "run_worker_first": true
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "elimutrack",
+      "database_id": "local"
+    }
+  ],
+  "vars": {
+    "FREEBUFF_CLIENT_ID": "582adf3c-2c40-4b2a-bf7f-f54159be978f",
+    "FREEBUFF_ISSUER": "https://freebuff.com/oidc",
+    "APP_ORIGIN": "http://localhost:8787"
+  },
+  "observability": {
+    "enabled": false
+  }
+}
