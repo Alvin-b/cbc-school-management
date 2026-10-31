@@ -1,1 +1,29 @@
-node_modules/\ndist/\ndist-worker/\n.wrangler/\n*.sqlite\n*.local\n.DS_Store\n
+node_modules/
+dist/
+dist-worker/
+.wrangler/tmp/
+*.sqlite
+*.local
+.DS_Store
+
+# Local wrangler state, probes and temp bundles
+dist-worker/_fresh-*.js
+dist-worker/_probe-*.js
+dist-worker/_probe-*
+
+# stray files produced during the sites deploy fix
+sites-assets/
+sites-worker.js
+sites-manifest.json
+
+# helper used only during this fix
+scripts/probe-build.mjs
+
+# editor backup
+src/App.tsx.bak
+
+# raw DB dumps and large binaries
+*.db
+
+# freebuff sites local build staging
+freebuff-sites-build/

@@ -23,7 +23,7 @@ Always deploy from `dist/` + `dist-worker/index.js`. Never deploy source files d
 
 - Node 18+ (tested on Node 20/22; the project uses `"type": "module"`)
 - A Cloudflare account with Wrangler installed, used only for:
-  - `wrangler.toml` / Wrangler config for D1 bindings
+  - Wrangler config for D1/Assets bindings
   - `wrangler d1 execute` to seed the local DB schema
   - `wrangler dev` for local preview with the bundled worker + assets
 - For a real hosted build you also need:
@@ -52,40 +52,78 @@ That runs:
 
 1. `vite build` → `dist/` (SPA, hashed JS/CSS in `dist/assets/`)
 2. `node scripts/build-worker.mjs` → `dist-worker/index.js` (worker bundle)
-3. `node scripts/patch-worker-asserts.mjs` — not run by default on `npm run build`;
 
-The default `build` target is intentionally the frontend + worker bundle only. To get a
-deployable artifact for Freebuff Sites-style hosting, run:
+To get a deployable artifact for Freebuff Sites-style hosting, run:
 
 ```bash
 npm run build:sites
 ```
 
 `build:sites` produces:
+
 - `dist/` — SPA, with `dist/assets/index-*.js` and `dist/assets/index-*.css`
 - `dist-worker/index.js` — worker bundle **with asset paths patched into it**
 - `dist/sites/manifest.json` — manifest for the deploy tool
+
+If you just want a clean rebuild of the worker from source, use the helper:
+
+```bash
+node scripts/build-worker.mjs
+```
+
+## Live smoke test
+
+Before and after deploy, run the smoke test against your deployed URL:
+
+```bash
+node scripts/smoke-test-live.mjs
+```
+
+It checks:
+
+- `/` and `/signin` return the SPA
+- `/api/session` returns JSON, not the SPA HTML
+- `/api/auth/login` accepts `POST` (not `405 Method Not Allowed`)
+- the pinned asset URLs actually serve JS/CSS, not the SPA HTML
+
+You should see `RESULT: PASS`. If the pinned build artifacts do not match the live
+HTML, the script also prints a clear `MISSING`/`PENDING` note.
 
 ## Freebuff Sites deployment
 
 If you are deploying through Freebuff Sites, use the Sites tooling, not raw Wrangler.
 
-```bash
-# 1. Prepare Next/Workers manifest (if this is a Sites-hosted project)
-npx sites_prepare_next --project-directory .
+### Deploy the current `dist/` + `dist-worker/index.js`
 
-# 2. Deploy the prepared manifest
-npx sites_deploy \\
-  --site-id <your-site-id> \\
-  --environment preview \\
-  --manifest-path dist/sites/manifest.json \\
-  --request-id <uuid>
+```bash
+node scripts/prepare-sites-deploy.mjs
 ```
 
-The manifest already points at:
+That helper:
+
+1. Rebuilds the worker from source (`node scripts/build-worker.mjs`)
+2. Patches asset paths into the worker bundle (`node scripts/patch-worker-assets.mjs`)
+3. Pins `dist/sites/manifest.json` to the exact `dist/assets/index-*.js` and
+   `dist/assets/index-*.css` produced by `vite build`
+
+Then deploy the pinned manifest:
+
+```bash
+# Replace the UUID each time you deploy.
+node scripts/check-deploy-artifacts.mjs --site-id site-4457d1964dd64e19ba7fec208a2066ee --request-id <uuid>
+```
+
+If you are using the Freebuff Sites tools directly, the manifest already points at:
+
 - `dist-worker/index.js` as the worker module
 - `dist/index.html` as the SPA entry
 - `dist/assets/` as the assets directory
+
+### Site ID
+
+This repo is published to `site-4457d1964dd64e19ba7fec208a2066ee.freebuff.page`.
+When you deploy to another site, update the `BASE` constant in
+`scripts/smoke-test-live.mjs` and the site id in any Sites tooling commands.
 
 ## Local Wrangler preview
 
@@ -96,11 +134,13 @@ npm run worker:dev
 ```
 
 That command:
+
 1. Rebuilds `dist-worker/index.js`
 2. Patches asset paths inside it (so it can serve `dist/assets/*.js/css`)
 3. Starts `wrangler dev --config wrangler.local.jsonc`
 
 `wrangler.local.jsonc` expects:
+
 - `ASSETS` binding to `./dist`
 - `DB` binding to a local D1 database named `elimutrack`
 - `FREEBUFF_CLIENT_ID`, `FREEBUFF_ISSUER`, `APP_ORIGIN` for local auth dev
@@ -156,46 +196,6 @@ If you are moving off Cloudflare, the two bindings to replace are:
 Everything else is plain ES module worker code with no Node/bundler runtime dependency at
 request time.
 
-## Smoke tests
-
-There are helper scripts under `scripts/`:
-
-- `scripts/smoke-test-live.mjs` — hits the live site’s `/api/session`, `/api/auth/login`,
-  and the asset URLs the HTML actually references
-- `scripts/build-worker.mjs` — rebuilds the worker bundle from `worker/src/index.js`
-- `scripts/patch-worker-assets.mjs` — rewrites asset paths in the bundled worker
-
-Run the live smoke test against your deployed URL:
-
-```bash
-node scripts/smoke-test-live.mjs
-```
-
-It will print:
-- the JS/CSS paths the HTML references
-- HTTP status + content-type for each asset
-- `/api/session` status and whether it returns HTML (bad) or JSON
-- `/api/auth/login` POST status and whether it returns 405 (bad)
-
-## Sign-in problems this project has had
-
-Two classes of failure have shown up in production:
-
-1. `/api/auth/login` returning `405 Method Not Allowed`
-   - Cause: the bundled worker’s route table did not include `/api/auth/login`.
-   - Fix: ensure `SERVICE_BY_PATH` in the worker includes
-     `"/api/auth/login": "staff"` and `"/api/auth/logout": "staff"`, and that the handler
-     accepts `POST`.
-   - This is the most common cause of the teacher sign-in 405.
-
-2. “Sign in with Freebuff” bouncing back to the login page
-   - Cause: `/api/session` returning the SPA HTML instead of JSON, so the frontend treats
-     the user as unauthenticated.
-   - Cause 2: the Freebuff session cookie is not being honored by the deployed worker, often
-     because `APP_ORIGIN` / client id / issuer on the live site do not match the site origin.
-   - Fix: deploy the patched worker, verify `/api/session` returns JSON, and set the correct
-     Freebuff auth variables on the live environment.
-
 ## Repo hygiene
 
 - Commit `dist/` artifacts for deployment: `dist/`, `dist-worker/index.js`,
@@ -204,6 +204,46 @@ Two classes of failure have shown up in production:
 - Keep `worker/schema.sql` in sync with whatever the worker expects
 - After any worker source change, rebuild with `npm run build` (or `build:sites`) before
   deploying
+
+## If something is broken after deploy
+
+1. Rebuild from source: `npm run build:sites`
+2. Verify the deployed worker is the patched bundle (`dist-worker/index.js`), not the old
+   `sites-worker.js` or any stale copy
+3. Run `node scripts/smoke-test-live.mjs` against the live URL
+4. Confirm `/api/auth/login` accepts POST and `/api/session` returns JSON
+5. Confirm Freebuff auth vars on the live environment match the site origin
+
+## Sign-in problems this project has had
+
+Two classes of failure have shown up in production.
+
+### `/api/auth/login` returning `405 Method Not Allowed`
+
+This is the teacher sign-in 405.
+
+- The deployed worker answered `OPTIONS /api/auth/login` with `405` and `Content-Length: 0`.
+- That means the route table for that path did not include the POST handler, so the worker
+  could not answer preflights or credentials submissions for that endpoint.
+- Root cause in this repo was that the deployed bundle was not the rebuilt `dist-worker/index.js`,
+  so changes to `worker/src/index.js` were never reaching the live site.
+- Real fix:
+  1. Rebuild the worker from source with `node scripts/build-worker.mjs` (or `npm run build:sites`)
+  2. Deploy `dist-worker/index.js` + `dist/`
+  3. Confirm `POST /api/auth/login` now returns `400/401/200` instead of `405`
+
+### “Sign in with Freebuff” bouncing back to the login page
+
+- `/api/session` was returning the SPA `index.html` instead of JSON.
+- The React app expects JSON from `/api/session`. When it receives HTML, it treats the user
+  as unauthenticated and redirects back to sign-in.
+- A second common cause is a Freebuff auth variable mismatch: `APP_ORIGIN` / client id / issuer
+  on the live site must match the site origin, or the session cookie is not honored.
+- Real fix:
+  1. Deploy the patched worker so `/api/session` routes through the normal API gate and returns
+     JSON
+  2. Verify `GET /api/session` returns `content-type: application/json`
+  3. Set the correct Freebuff auth variables on the live environment
 
 ## If you only want to run the frontend locally
 
@@ -215,11 +255,14 @@ That starts Vite on port 5173. API calls to `/api/*` are proxied to
 `http://127.0.0.1:8787`, so you normally run the worker (`npm run worker:dev`) in a second
 terminal.
 
-## If something is broken after deploy
+## Scripts reference
 
-1. Rebuild from source: `npm run build:sites`
-2. Verify the deployed worker is the patched bundle, not an old one
-3. Run `node scripts/smoke-test-live.mjs` against the live URL
-4. Confirm `/api/auth/login` accepts POST and `/api/session` returns JSON
-5. Confirm Freebuff auth vars on the live environment match the site origin
-
+- `scripts/build-worker.mjs` — bundles `worker/src/index.js` into `dist-worker/index.js`
+- `scripts/patch-worker-assets.mjs` — rewrites asset paths in the bundled worker so it can
+  serve `dist/assets/*`
+- `scripts/prepare-sites-deploy.mjs` — rebuild + patch + manifest pin in one step
+- `scripts/check-deploy-artifacts.mjs` — sanity-check that a manifest’s asset tokens match
+  the files in `dist/`
+- `scripts/smoke-test-live.mjs` — live checks against the deployed site
+- `scripts/patch-worker-bundle.mjs` — internal helper used during debugging; end users should
+  rebuild from source instead of hand-patching the bundle

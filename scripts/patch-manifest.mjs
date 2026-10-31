@@ -1,36 +1,65 @@
-import { readFileSync, writeFileSync, readdirSync } from 'node:fs';
+#!/usr/bin/env node
+import { readFileSync, writeFileSync, readdirSync, mkdirSync } from 'node:fs';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const manifestPath = 'dist/sites/manifest.json';
-let m = readFileSync(manifestPath, 'utf8');
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ROOT = join(__dirname, '..');
 
-// Normalise broken field siblings: prefer a valid schema shape.
-const fixed = m
-  .replace(/"entries":/g, '"modules":')
-  .replace(/"assetsDirectory":/g, '"assetsDirectory":');
+const DIST = join(ROOT, 'dist');
+const ASSETS = join(DIST, 'assets');
+const MANIFEST_DIR = join(DIST, 'sites');
+const MANIFEST = join(MANIFEST_DIR, 'manifest.json');
 
-// If an assets array already exists and is valid, keep it; otherwise rebuild.
-const assetsDir = 'dist/sites/assets';
-const names = readdirSync(assetsDir);
-const jsFile = names.find(f => /^index-.*\.js$/.test(f));
-const cssFile = names.find(f => /^index-.*\.css$/.test(f));
-const icoFile = names.find(f => /^favicon\.ico$/i.test(f));
+mkdirSync(MANIFEST_DIR, { recursive: true });
 
-const desiredAssets = [
-  ...(jsFile ? [{ path: `/assets/${jsFile}`, contentType: 'application/javascript' }] : []),
-  ...(cssFile ? [{ path: `/assets/${cssFile}`, contentType: 'text/css' }] : []),
-  ...(icoFile ? [{ path: `/favicon.ico`, contentType: 'image/x-icon' }] : []),
-];
+const html = readFileSync(join(DIST, 'index.html'), 'utf8');
 
-const hasValidAssetsArray = desiredAssets.length && /"assets":\s*\[[\s\S]*?\]/.test(fixed);
-let out;
-if (hasValidAssetsArray) {
-  out = fixed;
-} else {
-  out = fixed.replace(/"spa":\s*true/, () =>
-    JSON.stringify({ assets: desiredAssets, spa: true }, null, 2)
-  );
+const jsMatch = html.match(/"\/assets\/(index-[a-zA-Z0-9]+\.js)"/);
+const cssMatch = html.match(/"\/assets\/(index-[a-zA-Z0-9]+\.css)"/);
+
+if (!jsMatch || !cssMatch) {
+  console.error('Could not find hashed index JS/CSS in dist/index.html');
+  console.log('jsMatch:', jsMatch ? jsMatch[1] : null);
+  console.log('cssMatch:', cssMatch ? cssMatch[1] : null);
+  process.exit(1);
 }
 
-writeFileSync(manifestPath, out);
-console.log('patched manifest -> js:', jsFile, 'css:', cssFile, 'ico:', icoFile);
-console.log(readFileSync(manifestPath, 'utf8'));
+const jsName = jsMatch[1];
+const cssName = cssMatch[1];
+
+const files = readdirSync(ASSETS);
+const present = {
+  js: files.includes(jsName),
+  css: files.includes(cssName),
+};
+
+if (!present.js || !present.css) {
+  console.error('Hashed asset referenced in index.html is missing from dist/assets/');
+  console.log('js present:', present.js, jsName);
+  console.log('css present:', present.css, cssName);
+  process.exit(1);
+}
+
+const manifest = {
+  entrypoint: 'index.js',
+  compatibilityDate: '2025-06-01',
+  modules: [
+    {
+      name: 'index.js',
+      type: 'esm',
+      path: './dist-worker/index.js',
+    },
+  ],
+  assetsDirectory: './dist',
+  spa: true,
+  _pinnedFrom: process.cwd(),
+  _htmlAssetRefs: {
+    js: jsName,
+    css: cssName,
+  },
+};
+
+writeFileSync(MANIFEST, JSON.stringify(manifest, null, 2) + '\n', 'utf8');
+console.log('wrote', MANIFEST);
+console.log('manifest:', JSON.stringify(manifest, null, 2));
