@@ -46,6 +46,7 @@ const SERVICE_BY_PATH = {
   '/api/attendance': 'attendance',
   '/api/observations': 'observations',
   '/api/broadsheet': 'broadsheet',
+  '/api/broadsheet/csv': 'broadsheet',
   '/api/learners': 'learners',
   '/api/payments': 'fees',
   '/api/whatsapp': 'whatsapp',
@@ -56,12 +57,15 @@ const SERVICE_BY_PATH = {
   '/api/recordwork': 'recordwork',
   '/api/progress': 'progress',
   '/api/kicd': 'kicd',
+  '/api/resources': 'kicd',
+  '/api/klb/books': 'kicd',
+  '/api/klb/topics': 'kicd',
   '/api/lesson-plans': 'lesson_plans',
   '/api/reportcards': 'reportcards',
   '/api/pathways': 'pathways',
 };
 
-/** Admin-only routes: a teacher session can never reach them. */
+/** Admin-only routes: a teacher session can never reach them (or anything nested under them). */
 const ADMIN_PATHS = ['/api/staff', '/api/plan', '/api/seed'];
 
 const STAFF_COOKIE = 'elmt_staff';
@@ -257,6 +261,38 @@ async function assertLearnersInScope(env, access, ids) {
   return null;
 }
 
+/**
+ * Columns added after a table was first created. `CREATE TABLE IF NOT EXISTS`
+ * never alters an existing table, so a database created by an earlier build
+ * would otherwise be missing these and every SELECT naming them fails.
+ * Applied one at a time so an already-present column is a harmless no-op.
+ */
+const COLUMN_MIGRATIONS = [
+  ['learners', 'boarding', 'INTEGER NOT NULL DEFAULT 0'],
+  ['learners', 'admission_fee_paid', 'INTEGER NOT NULL DEFAULT 0'],
+  ['learners', 'additional_fees', 'INTEGER NOT NULL DEFAULT 0'],
+  ['fee_config', 'fee_amount', 'INTEGER NOT NULL DEFAULT 0'],
+  ['fee_config', 'boarding_fee', 'INTEGER NOT NULL DEFAULT 0'],
+  ['fee_config', 'day_fee', 'INTEGER NOT NULL DEFAULT 0'],
+  ['fee_config', 'admission_fee', 'INTEGER NOT NULL DEFAULT 0'],
+  ['lesson_plans', 'sub_strand', "TEXT NOT NULL DEFAULT ''"],
+  ['kicd_designs', 'experiences', "TEXT NOT NULL DEFAULT ''"],
+  // Curriculum provenance: whether a design is official KICD content, school
+  // entered, or (until verified) sample data — plus where it came from.
+  ['kicd_designs', 'origin', "TEXT NOT NULL DEFAULT 'school'"],
+  ['kicd_designs', 'source_url', "TEXT NOT NULL DEFAULT ''"],
+  ['kicd_designs', 'source_title', "TEXT NOT NULL DEFAULT ''"],
+  ['kicd_designs', 'version_label', "TEXT NOT NULL DEFAULT ''"],
+  ['kicd_designs', 'version_date', "TEXT NOT NULL DEFAULT ''"],
+  ['kicd_designs', 'last_checked_at', "TEXT NOT NULL DEFAULT ''"],
+  ['kicd_designs', 'status', "TEXT NOT NULL DEFAULT 'active'"],
+  // Marks that a tenant seeded before the Grade 1 pilot existed has been
+  // backfilled, so the one-time backfill never resurrects deleted rows.
+  ['tenants', 'kicd_pilot_backfilled', 'INTEGER NOT NULL DEFAULT 0'],
+  ['progress_records', 'strand', "TEXT NOT NULL DEFAULT ''"],
+  ['progress_records', 'sub_strand', "TEXT NOT NULL DEFAULT ''"],
+];
+
 async function ensureSchema(env) {
   if (schemaReady) return;
   // D1's exec() splits the script in a way that breaks multi-line CREATE TABLE
@@ -268,6 +304,21 @@ async function ensureSchema(env) {
     .join('\n');
   const statements = sql.split(';').map((s) => s.trim()).filter(Boolean);
   await env.DB.batch(statements.map((s) => env.DB.prepare(s)));
+
+  for (const [table, column, definition] of COLUMN_MIGRATIONS) {
+    try {
+      await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+    } catch {
+      // Column already exists — the only expected failure here.
+    }
+  }
+  // Fix timetable unique constraint to include stream
+  try {
+    await env.DB.prepare('DROP INDEX IF EXISTS idx_tt_unique').run();
+    await env.DB.prepare('CREATE UNIQUE INDEX IF NOT EXISTS idx_tt_unique ON timetable_entries (tenant_id, day, period, stream)').run();
+  } catch {
+    // ignore
+  }
   schemaReady = true;
 }
 
@@ -1112,7 +1163,6 @@ const DEFAULT_LESSON_TEMPLATE = {
     { key: 'sec5', label: 'Assessment / Evidence of Learning' },
     { key: 'sec6', label: 'Remedial & Enrichment' },
     { key: 'sec7', label: 'End-of-Lesson Remarks / Comments' },
-    { key: 'sub_strand', label: 'Sub-Topic / Sub-Strand' },
   ],
 };
 
@@ -1169,7 +1219,7 @@ function parseContent(value) {
 async function listLessonPlans(env, access) {
   const scope = scopeClause(access);
   const res = await env.DB.prepare(
-    `SELECT id, staff_id, author, stream, subject_id, lesson_date, topic, content, updated_at
+    `SELECT id, staff_id, author, stream, subject_id, lesson_date, topic, sub_strand, content, updated_at
        FROM lesson_plans WHERE tenant_id = ?${scope.clause}
       ORDER BY lesson_date DESC, stream, topic LIMIT 300`,
   ).bind(access.tenant.id, ...scope.binds).all();
@@ -1181,6 +1231,7 @@ async function listLessonPlans(env, access) {
     subjectId: r.subject_id,
     lessonDate: r.lesson_date,
     topic: r.topic,
+    subStrand: r.sub_strand || '',
     content: parseContent(JSON.parse(r.content || '{}')),
     updatedAt: r.updated_at,
   }));
@@ -1191,6 +1242,7 @@ async function saveLessonPlan(env, access, user, body) {
   const subjectId = String(body.subjectId || '');
   const lessonDate = String(body.lessonDate || '');
   const topic = String(body.topic || '').trim();
+  const subStrand = String(body.subStrand || '').trim();
   if (!stream || !lessonDate || !topic) return err(400, 'VALIDATION', 'Class, date and topic are required');
   if (!SUBJECT_BY_ID[subjectId]) return err(400, 'VALIDATION', 'Choose a learning area');
   if (access.role === 'teacher' && !access.streams.includes(stream)) {
@@ -1202,13 +1254,13 @@ async function saveLessonPlan(env, access, user, body) {
   const author = access.staff ? access.staff.name : (user && (user.name || user.email)) || 'Admin';
   const id = `lp_${uuid()}`;
   await env.DB.prepare(
-    `INSERT INTO lesson_plans (id, tenant_id, staff_id, author, stream, subject_id, lesson_date, topic, content)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO lesson_plans (id, tenant_id, staff_id, author, stream, subject_id, lesson_date, topic, sub_strand, content)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(
     id, access.tenant.id, access.staff ? access.staff.id : '', author,
-    stream, subjectId, lessonDate, topic, JSON.stringify(content),
+    stream, subjectId, lessonDate, topic, subStrand, JSON.stringify(content),
   ).run();
-  return json({ plan: { id, stream, subjectId, lessonDate, topic, author, content } }, { status: 201 });
+  return json({ plan: { id, stream, subjectId, lessonDate, topic, subStrand, author, content } }, { status: 201 });
 }
 
 async function updateLessonPlan(env, access, user, body) {
@@ -1239,6 +1291,9 @@ async function updateLessonPlan(env, access, user, body) {
     const topic = String(body.topic || '').trim();
     if (!topic) return err(400, 'VALIDATION', 'Topic cannot be empty');
     fields.push('topic = ?'); binds.push(topic);
+  }
+  if (body.subStrand !== undefined) {
+    fields.push('sub_strand = ?'); binds.push(String(body.subStrand || '').trim());
   }
   if (body.content !== undefined) {
     const content = parseContent(body.content);
@@ -1440,18 +1495,29 @@ async function saveTimetableEntry(env, access, body) {
   if (!DAYS.includes(day) || !Number.isInteger(period) || period < 1 || !stream || !subjectId) {
     return err(400, 'VALIDATION', 'Day, period, class and learning area are required');
   }
-  const staffId = String(body.staffId || '');
+  let staffId = String(body.staffId || '');
   if (staffId) {
-    const exists = await env.DB.prepare('SELECT id FROM staff WHERE id = ? AND tenant_id = ?')
-      .bind(staffId, access.tenant.id).first();
-    if (!exists) return err(404, 'NOT_FOUND', 'Teacher not found');
+    // For admins, staffId might be the user's sub; only validate if it's a staff record
+    if (access.role === 'teacher') {
+      const exists = await env.DB.prepare('SELECT id FROM staff WHERE id = ? AND tenant_id = ?')
+        .bind(staffId, access.tenant.id).first();
+      if (!exists) return err(404, 'NOT_FOUND', 'Teacher not found');
+    } else if (access.role === 'admin') {
+      // Check if it's a staff record; if not, treat as admin assignment (empty or keep as is)
+      const exists = await env.DB.prepare('SELECT id FROM staff WHERE id = ? AND tenant_id = ?')
+        .bind(staffId, access.tenant.id).first();
+      if (!exists) {
+        staffId = ''; // Admin assignment, don't require staff record
+      }
+    }
   }
+  // Remove existing entry for this slot first to avoid ON CONFLICT issues
+  await env.DB.prepare(
+    'DELETE FROM timetable_entries WHERE tenant_id = ? AND day = ? AND period = ? AND stream = ?',
+  ).bind(access.tenant.id, day, period, stream).run();
   await env.DB.prepare(
     `INSERT INTO timetable_entries (id, tenant_id, day, period, stream, subject_id, staff_id, room)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(tenant_id, day, period) DO UPDATE SET
-       stream = excluded.stream, subject_id = excluded.subject_id,
-       staff_id = excluded.staff_id, room = excluded.room`,
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(`tt_${uuid()}`, access.tenant.id, day, period, stream, subjectId, staffId, String(body.room || '')).run();
   return json({ ok: true }, { status: 201 });
 }
@@ -1459,7 +1525,8 @@ async function saveTimetableEntry(env, access, body) {
 async function saveTimetablePeriods(env, access, body) {
   if (access.role !== 'admin') return err(403, 'FORBIDDEN', 'Only the administrator edits timetable periods');
   const list = Array.isArray(body.periods) ? body.periods : [];
-  if (list.length < 1 || list.length > 16) return err(400, 'VALIDATION', 'Keep between 1 and 16 periods');
+  // An empty list clears the day — the UI offers that via its empty state.
+  if (list.length > 16) return err(400, 'VALIDATION', 'Keep at most 16 periods');
   const stmts = [env.DB.prepare('DELETE FROM timetable_periods WHERE tenant_id = ?').bind(access.tenant.id)];
   for (let i = 0; i < list.length; i++) {
     const p = list[i] || {};
@@ -1570,20 +1637,25 @@ async function listProgress(env, access, q) {
   const clauses = ['p.tenant_id = ?'];
   const binds = [access.tenant.id];
   const learnerId = q.get('learner') || '';
+  const strand = q.get('strand') || '';
+  const subStrand = q.get('substrand') || q.get('subStrand') || '';
   if (learnerId) { clauses.push('p.learner_id = ?'); binds.push(learnerId); }
+  if (strand) { clauses.push('p.strand = ?'); binds.push(strand); }
+  if (subStrand) { clauses.push('p.sub_strand = ?'); binds.push(subStrand); }
   const scope = scopeClause(access, 'l.');
   if (scope.clause) { clauses.push(scope.clause.replace(/^\s*AND\s+/, '').trim()); binds.push(...scope.binds); }
   const where = clauses.filter(Boolean).join(' AND ');
   const res = await env.DB.prepare(
-    `SELECT p.id, p.learner_id, p.staff_id, p.author, p.subject_id, p.term, p.day, p.stage, p.note,
+    `SELECT p.id, p.learner_id, p.staff_id, p.author, p.subject_id, p.strand, p.sub_strand, p.term, p.day, p.stage, p.note,
             p.created_at, l.name AS learner_name, l.stream
        FROM progress_records p JOIN learners l ON l.id = p.learner_id
-      WHERE ${where} ORDER BY p.created_at DESC LIMIT 300`,
+      WHERE ${where} ORDER BY p.created_at DESC LIMIT 500`,
   ).bind(...binds).all();
   return res.results.map((r) => ({
     id: r.id, learnerId: r.learner_id, learnerName: r.learner_name, stream: r.stream,
-    staffId: r.staff_id, author: r.author, subjectId: r.subject_id, term: r.term,
-    day: r.day, stage: r.stage, note: r.note, createdAt: r.created_at,
+    staffId: r.staff_id, author: r.author, subjectId: r.subject_id, 
+    strand: r.strand || '', subStrand: r.sub_strand || '',
+    term: r.term, day: r.day, stage: r.stage, note: r.note, createdAt: r.created_at,
   }));
 }
 
@@ -1599,10 +1671,11 @@ async function addProgress(env, access, user, body) {
   const author = access.staff ? access.staff.name : (user && (user.name || user.email)) || 'Admin';
   const id = `prg_${uuid()}`;
   await env.DB.prepare(
-    `INSERT INTO progress_records (id, tenant_id, learner_id, staff_id, author, subject_id, term, day, stage, note)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    `INSERT INTO progress_records (id, tenant_id, learner_id, staff_id, author, subject_id, strand, sub_strand, term, day, stage, note)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).bind(id, access.tenant.id, learnerId, access.staff ? access.staff.id : '', author,
-    String(body.subjectId || ''), String(body.term || ''), day, stage, note).run();
+    String(body.subjectId || ''), String(body.strand || ''), String(body.subStrand || ''),
+    String(body.term || ''), day, stage, note).run();
   return json({ record: { id, learnerId, day, stage, note } }, { status: 201 });
 }
 
@@ -1621,6 +1694,22 @@ async function deleteProgress(env, access, body) {
 /* ------------------------------------------------- KICD curriculum designs */
 
 const KICD_LEVELS = ['Pre-Primary', 'Lower Primary', 'Upper Primary', 'Junior School'];
+
+/**
+ * Official KICD pages, verified against kicd.ac.ke. The site is
+ * "© Kenya Institute of Curriculum Development. All Rights Reserved" — approval
+ * to use material in schools is not a licence to redistribute it, so these are
+ * links to the source rather than copies of the documents themselves.
+ */
+const KICD_SOURCES = [
+  { key: 'materials', label: 'CBC Materials', url: 'https://kicd.ac.ke/cbc-materials/' },
+  { key: 'designs', label: 'Curriculum Designs', url: 'https://kicd.ac.ke/cbc-materials/curriculum-designs/' },
+  { key: 'regular', label: 'Regular Curriculum Designs', url: 'https://kicd.ac.ke/cbc-materials/curriculum-designs/regular-curriculum-designs/' },
+  { key: 'course_books', label: 'Approved CBC Course Materials', url: 'https://kicd.ac.ke/cbc-materials/approved-cbc-course-materials/' },
+  { key: 'complementary', label: 'Approved Complementary Materials', url: 'https://kicd.ac.ke/cbc-materials/approved-complementary-materials/' },
+  { key: 'parents', label: 'Parental Empowerment & Engagement Guidelines', url: 'https://kicd.ac.ke/cbc-materials/guidelines-on-parental-empowerment-and-engagement/' },
+];
+const ORIGINS = ['kicd', 'school', 'sample'];
 
 /**
  * A starter library so the page works out of the box. This is an abbreviated,
@@ -1653,6 +1742,26 @@ function starterDesigns(tenantId) {
       ['Pair discussions, choral responding, story retelling'],
       ['How do we help each other understand when we talk?'],
       ['Picture cards, storybooks, charts'], ''],
+    ['regular', 'Lower Primary', 'Grade 1', 'kis_p', 'Speaking', 'Everyday Conversation',
+      ['Greet others and take part in short exchanges', 'Name familiar people, objects and actions', 'Answer simple questions about daily routine'],
+      ['Greeting drills, role play at the shop and home', 'Naming games with classroom objects'],
+      ['How do we greet one another politely?', 'Which words name the things we use every day?'],
+      ['Picture cards, classroom objects, word wall'], ''],
+    ['regular', 'Lower Primary', 'Grade 1', 'env_p', 'Environment', 'Our Surroundings',
+      ['Identify living and non-living things around the school', 'Describe the weather on a given day', 'Practise keeping the school compound clean'],
+      ['Nature walk around the school compound', 'Sorting cards into living and non-living', 'Clean-up routine'],
+      ['What lives around our school?', 'How do we keep our environment clean?'],
+      ['Chart paper, locally collected samples, pictures'], ''],
+    ['regular', 'Lower Primary', 'Grade 1', 'rel_p', 'Creation', 'Care for Creation',
+      ['Name things that show the world is cared for', 'Practise looking after plants and animals', 'Share one way of caring for others'],
+      ['Watering the school garden', 'Story sharing about caring for one another'],
+      ['Who looks after everything we see?', 'How can we care for what we have been given?'],
+      ['School garden, picture cards, storybooks'], ''],
+    ['regular', 'Lower Primary', 'Grade 1', 'crt_p', 'Movement & Rhythm', 'Body Awareness',
+      ['Move safely to a steady beat', 'Copy simple action rhythms', 'Work with a partner without bumping into others'],
+      ['Action songs and clapping patterns', 'Obstacle courses and partner mirroring'],
+      ['How does our body keep time with the music?', 'How do we move safely together?'],
+      ['Clapping sticks, drums, open floor space'], ''],
     ['regular', 'Upper Primary', 'Grade 4', 'math_p', 'Fractions', 'Equivalent Fractions & Operations',
       ['Identify and generate equivalent fractions', 'Add and subtract fractions with like denominators'],
       ['Fold paper strips to find equivalents', 'Solve money and measure problems using fractions'],
@@ -1702,38 +1811,168 @@ function starterDesigns(tenantId) {
       ['How does a predictable routine help us learn?'],
       ['Visual schedule boards, timers, structured work folders'],
       'Keep routines consistent, use visual schedules and advance notice of transitions, and reduce sensory distractions in the workspace.'],
+    // Grade 2
+    ['regular', 'Lower Primary', 'Grade 2', 'math_p', 'Numbers', 'Place Value & Operations',
+      ['Read and write numbers up to 999', 'Add and subtract numbers up to 999 with and without regrouping'],
+      ['Use place value charts and abacus for operations'],
+      ['How do we regroup numbers?'],
+      ['Place value charts, abacus, number cards'], ''],
+    ['regular', 'Lower Primary', 'Grade 2', 'eng_p', 'Reading & Writing', 'Comprehension',
+      ['Read aloud with fluency', 'Answer comprehension questions', 'Write simple paragraphs'],
+      ['Shared reading, guided reading, story writing'],
+      ['What can we learn from stories?'],
+      ['Storybooks, charts, writing materials'], ''],
+    ['regular', 'Lower Primary', 'Grade 2', 'kis_p', 'Reading', 'Ufahamu',
+      ['Soma kwa matamshi mazuri', 'Jibu maswali ya ufahamu'],
+      ['Kusoma kwa pamoja na kusimulia hadithi'],
+      ['Tunajifunza nini kutoka kwa hadithi?'],
+      ['Vitabu vya hadithi, michoro'], ''],
+    ['regular', 'Lower Primary', 'Grade 2', 'env_p', 'Environment', 'Safety & Health',
+      ['Identify safety rules at home and school', 'Practice personal hygiene'],
+      ['Role play on safety, hygiene demonstrations'],
+      ['How do we keep ourselves safe and healthy?'],
+      ['Posters, soap, water containers'], ''],
+    // Grade 3
+    ['regular', 'Lower Primary', 'Grade 3', 'math_p', 'Numbers', 'Multiplication & Division',
+      ['Multiply numbers up to 5x5', 'Divide numbers by 2,3,4,5'],
+      ['Use arrays and grouping for multiplication'],
+      ['How are multiplication and division related?'],
+      ['Counters, multiplication tables, arrays'], ''],
+    ['regular', 'Lower Primary', 'Grade 3', 'eng_p', 'Grammar', 'Parts of Speech',
+      ['Identify nouns, verbs and adjectives', 'Use them in sentences'],
+      ['Games on word classes, sentence construction'],
+      ['How do words work together?'],
+      ['Word cards, sentence strips'], ''],
+    // Grade 5
+    ['regular', 'Upper Primary', 'Grade 5', 'math_p', 'Decimals', 'Operations with Decimals',
+      ['Add and subtract decimals', 'Convert fractions to decimals'],
+      ['Use place value charts for decimals'],
+      ['Where do we use decimals in real life?'],
+      ['Decimal charts, money models'], ''],
+    ['regular', 'Upper Primary', 'Grade 5', 'eng_p', 'Composition', 'Narrative Writing',
+      ['Write a narrative with introduction, body and conclusion'],
+      ['Planning, drafting and editing stories'],
+      ['How do we tell an engaging story?'],
+      ['Story outlines, sample narratives'], ''],
+    // Grade 6
+    ['regular', 'Upper Primary', 'Grade 6', 'math_p', 'Ratios & Proportions', 'Percentages',
+      ['Calculate percentages', 'Solve problems involving ratios'],
+      ['Use real-life shopping contexts'],
+      ['When do we use percentages?'],
+      ['Price tags, calculators, charts'], ''],
+    ['regular', 'Upper Primary', 'Grade 6', 'sci_p', 'Living Things', 'Human Body Systems',
+      ['Identify major body systems', 'Explain their functions'],
+      ['Model making of body systems'],
+      ['How do body systems work together?'],
+      ['Models, charts, diagrams'], ''],
+    // Grade 8
+    ['regular', 'Junior School', 'Grade 8', 'isci', 'Matter', 'Acids, Bases & Indicators',
+      ['Classify substances as acids or bases', 'Use natural indicators'],
+      ['Practical experiments with indicators'],
+      ['How can we identify acids and bases?'],
+      ['Red cabbage, litmus paper, household substances'], ''],
+    ['regular', 'Junior School', 'Grade 8', 'agri', 'Crop Production', 'Soil Fertility',
+      ['Explain soil fertility', 'Practice soil conservation'],
+      ['School farm activities'],
+      ['How do we maintain soil fertility?'],
+      ['Farm tools, compost, manure'], ''],
+    // Grade 9
+    ['regular', 'Junior School', 'Grade 9', 'math', 'Geometry', 'Transformations',
+      ['Perform reflection, rotation, translation', 'Enlarge shapes'],
+      ['Use grid paper for transformations'],
+      ['Where do we see transformations?'],
+      ['Graph paper, mirrors, shapes'], ''],
+    ['regular', 'Junior School', 'Grade 9', 'ptech', 'Workshop Practice', 'Safety & Tools',
+      ['Observe workshop safety rules', 'Identify and use basic tools'],
+      ['Practical tool handling'],
+      ['Why is safety important in the workshop?'],
+      ['Workshop tools, safety gear'], ''],
   ];
-  return rows.map((r, i) => ({
-    id: `kicd_starter_${i + 1}`,
-    tenant_id: tenantId,
-    category: r[0], level: r[1], grade: r[2], subject_id: r[3],
-    strand: r[4], sub_strand: r[5],
-    outcomes: JSON.stringify(r[6]), competencies: CBC_COMPETENCIES,
-    standards: BANDS, inquiry: JSON.stringify(r[7]), resources: JSON.stringify(r[8]),
-    inclusive: r[9] || '',
-  }));
+  // Shape: category, level, grade, subject, strand, [sub-strand], outcomes,
+  // learning experiences, inquiry questions, resources, inclusive notes.
+  // Some rows omit the sub-strand (and fold it into the strand with an em dash),
+  // so the slot is detected rather than assumed — indexing these wrongly binds an
+  // array to a TEXT column, which D1 rejects and takes the whole route down.
+  return rows.map((r, i) => {
+    const hasSubStrand = !Array.isArray(r[5]);
+    const strandCell = String(r[4] || '');
+    const parts = strandCell.split('—').map((s) => s.trim());
+    const rest = hasSubStrand ? r.slice(6) : r.slice(5);
+    const [outcomes, experiences, inquiry, resources, inclusive] = rest;
+    return {
+      id: `kicd_starter_${i + 1}`,
+      tenant_id: tenantId,
+      category: String(r[0] || ''),
+      level: String(r[1] || ''),
+      grade: String(r[2] || ''),
+      subject_id: String(r[3] || ''),
+      strand: hasSubStrand ? strandCell : parts[0],
+      sub_strand: hasSubStrand ? String(r[5] || '') : parts.slice(1).join(' — '),
+      outcomes: JSON.stringify(outcomes || []),
+      experiences: JSON.stringify(experiences || []),
+      competencies: CBC_COMPETENCIES,
+      standards: BANDS,
+      inquiry: JSON.stringify(inquiry || []),
+      resources: JSON.stringify(resources || []),
+      inclusive: String(inclusive || ''),
+      // Sample content, not KICD curriculum. The app must never present it as
+      // official: provenance is what lets a teacher tell the difference.
+      origin: 'sample',
+      status: 'active',
+      source_url: '',
+      source_title: 'Sample framework data shipped with ElimuTrack',
+      version_label: 'unverified sample',
+      version_date: '',
+      last_checked_at: '',
+    };
+  });
+}
+
+function designInsert(env, d) {
+  return env.DB.prepare(
+    `INSERT OR IGNORE INTO kicd_designs
+       (id, tenant_id, category, level, grade, subject_id, strand, sub_strand,
+        outcomes, experiences, competencies, standards, inquiry, resources, inclusive,
+        origin, status, source_url, source_title, version_label, version_date, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(d.id, d.tenant_id, d.category, d.level, d.grade, d.subject_id, d.strand, d.sub_strand,
+    d.outcomes, d.experiences, d.competencies, d.standards, d.inquiry, d.resources, d.inclusive,
+    d.origin, d.status, d.source_url, d.source_title, d.version_label, d.version_date, d.last_checked_at);
 }
 
 async function ensureKicdLibrary(env, tenantId) {
-  const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM kicd_designs WHERE tenant_id = ?')
-    .bind(tenantId).first();
-  if ((count?.n ?? 0) > 0) return;
-  await env.DB.batch(starterDesigns(tenantId).map((d) => env.DB.prepare(
-    `INSERT OR IGNORE INTO kicd_designs
-       (id, tenant_id, category, level, grade, subject_id, strand, sub_strand,
-        outcomes, competencies, standards, inquiry, resources, inclusive)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(d.id, d.tenant_id, d.category, d.level, d.grade, d.subject_id, d.strand, d.sub_strand,
-    d.outcomes, d.competencies, d.standards, d.inquiry, d.resources, d.inclusive)));
+  // Do not auto-load sample data - use only real KICD designs added by admin
+  // Remove any existing sample data
+  try {
+    await env.DB.prepare("DELETE FROM kicd_designs WHERE tenant_id = ? AND origin = 'sample'").bind(tenantId).run();
+  } catch {
+    // ignore
+  }
+  const markDone = () => env.DB.prepare(
+    'UPDATE tenants SET kicd_pilot_backfilled = 1 WHERE id = ?',
+  ).bind(tenantId).run();
+  try {
+    await markDone();
+  } catch {
+    // ignore
+  }
 }
 
 function designToJson(r) {
   return {
     id: r.id, category: r.category, level: r.level, grade: r.grade,
     subjectId: r.subject_id, strand: r.strand, subStrand: r.sub_strand,
-    outcomes: parseList(r.outcomes), competencies: parseList(r.competencies),
+    outcomes: parseList(r.outcomes), experiences: parseList(r.experiences),
+    competencies: parseList(r.competencies),
     standards: parseList(r.standards), inquiry: parseList(r.inquiry),
     resources: parseList(r.resources), inclusive: r.inclusive || '',
+    origin: r.origin || 'school',
+    status: r.status || 'active',
+    sourceUrl: r.source_url || '',
+    sourceTitle: r.source_title || '',
+    versionLabel: r.version_label || '',
+    versionDate: r.version_date || '',
+    lastCheckedAt: r.last_checked_at || '',
   };
 }
 
@@ -1743,15 +1982,29 @@ async function listKicd(env, access, q) {
   const binds = [access.tenant.id];
   const category = q.get('category') || 'regular';
   clauses.push('category = ?'); binds.push(category);
+  // Do not show sample data
+  if (q.get('includeSample') !== '1') clauses.push("origin <> 'sample'");
   if (q.get('level')) { clauses.push('level = ?'); binds.push(q.get('level')); }
   if (q.get('grade')) { clauses.push('grade = ?'); binds.push(q.get('grade')); }
   if (q.get('subject')) { clauses.push('subject_id = ?'); binds.push(q.get('subject')); }
+  if (q.get('strand')) { clauses.push('strand = ?'); binds.push(q.get('strand')); }
+  if (q.get('origin')) {
+    if (!ORIGINS.includes(q.get('origin'))) return err(400, 'VALIDATION', 'Unknown origin');
+    clauses.push('origin = ?'); binds.push(q.get('origin'));
+  }
+  // Withdrawn versions stay in the table so reports keep their history, but
+  // they are not offered for new planning unless explicitly requested.
+  if (q.get('includeDisabled') !== '1') clauses.push("status <> 'disabled'");
   const res = await env.DB.prepare(
     `SELECT * FROM kicd_designs WHERE ${clauses.join(' AND ')} ORDER BY level, subject_id, strand`,
   ).bind(...binds).all();
+  const designs = res.results.map(designToJson);
+  const strands = [...new Set(designs.map((d) => d.strand).filter(Boolean))].sort();
   return {
     levels: KICD_LEVELS,
-    designs: res.results.map(designToJson),
+    sources: KICD_SOURCES,
+    strands,
+    designs,
   };
 }
 
@@ -1767,26 +2020,53 @@ async function saveKicd(env, access, body, isUpdate) {
   }
   const values = [
     level, String(body.grade || ''), subjectId, strand, String(body.subStrand || ''),
-    toJsonList(body.outcomes), toJsonList(body.competencies), toJsonList(body.standards),
+    toJsonList(body.outcomes), toJsonList(body.experiences),
+    toJsonList(body.competencies), toJsonList(body.standards),
     toJsonList(body.inquiry), toJsonList(body.resources), String(body.inclusive || ''),
   ];
+
+  // Provenance. Content claimed as official must cite where it came from,
+  // otherwise a teacher cannot tell KICD curriculum from school notes.
+  const origin = String(body.origin || 'school');
+  if (!ORIGINS.includes(origin)) return err(400, 'VALIDATION', 'Origin must be KICD, school or sample');
+  const status = String(body.status || 'active');
+  if (!['active', 'disabled'].includes(status)) return err(400, 'VALIDATION', 'Status must be active or disabled');
+  const sourceUrl = String(body.sourceUrl || '').trim();
+  if (sourceUrl && !/^https:\/\//.test(sourceUrl)) {
+    return err(400, 'VALIDATION', 'Source link must be an https URL');
+  }
+  if (origin === 'kicd' && !sourceUrl) {
+    return err(400, 'VALIDATION', 'Official KICD content needs its source link and version');
+  }
+  if (origin === 'kicd' && !String(body.versionLabel || '').trim()) {
+    return err(400, 'VALIDATION', 'Official KICD content needs a version label');
+  }
+  const provenance = [
+    origin, status, sourceUrl, String(body.sourceTitle || '').slice(0, 200),
+    String(body.versionLabel || '').slice(0, 120), String(body.versionDate || '').slice(0, 40),
+    String(body.lastCheckedAt || '').slice(0, 40),
+  ];
+
   if (isUpdate) {
     const id = String(body.id || '');
     await env.DB.prepare(
       `UPDATE kicd_designs SET category = ?, level = ?, grade = ?, subject_id = ?, strand = ?,
-              sub_strand = ?, outcomes = ?, competencies = ?, standards = ?, inquiry = ?,
-              resources = ?, inclusive = ?, updated_at = datetime('now')
+              sub_strand = ?, outcomes = ?, experiences = ?, competencies = ?, standards = ?,
+              inquiry = ?, resources = ?, inclusive = ?,
+              origin = ?, status = ?, source_url = ?, source_title = ?, version_label = ?,
+              version_date = ?, last_checked_at = ?, updated_at = datetime('now')
         WHERE id = ? AND tenant_id = ?`,
-    ).bind(category, ...values, id, access.tenant.id).run();
+    ).bind(category, ...values, ...provenance, id, access.tenant.id).run();
     return json({ ok: true });
   }
   const id = `kicd_${uuid()}`;
   await env.DB.prepare(
     `INSERT INTO kicd_designs
        (id, tenant_id, category, level, grade, subject_id, strand, sub_strand,
-        outcomes, competencies, standards, inquiry, resources, inclusive)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-  ).bind(id, access.tenant.id, category, ...values).run();
+        outcomes, experiences, competencies, standards, inquiry, resources, inclusive,
+        origin, status, source_url, source_title, version_label, version_date, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, access.tenant.id, category, ...values, ...provenance).run();
   return json({ design: { id } }, { status: 201 });
 }
 
@@ -1794,6 +2074,312 @@ async function deleteKicd(env, access, body) {
   if (access.role !== 'admin') return err(403, 'FORBIDDEN', 'Only the administrator maintains the KICD library');
   const id = String(body.id || '');
   await env.DB.prepare('DELETE FROM kicd_designs WHERE id = ? AND tenant_id = ?')
+    .bind(id, access.tenant.id).run();
+  return json({ ok: true });
+}
+
+/* --------------------------------------------------------- KLB books & topics */
+
+async function listKlbBooks(env, access, q) {
+  const clauses = ['tenant_id = ?'];
+  const binds = [access.tenant.id];
+  if (q.get('grade')) { clauses.push('grade = ?'); binds.push(q.get('grade')); }
+  if (q.get('subject')) { clauses.push('subject_id = ?'); binds.push(q.get('subject')); }
+  if (q.get('status') !== 'all') clauses.push("status = 'active'");
+  const res = await env.DB.prepare(
+    `SELECT * FROM klb_books WHERE ${clauses.join(' AND ')} ORDER BY grade, subject_id, book_title`,
+  ).bind(...binds).all();
+  return {
+    books: res.results.map((r) => ({
+      id: r.id,
+      publisher: r.publisher,
+      bookTitle: r.book_title,
+      grade: r.grade,
+      level: r.level,
+      subjectId: r.subject_id,
+      edition: r.edition,
+      year: r.year,
+      isbn: r.isbn,
+      licenseInfo: r.license_info,
+      permittedUsage: r.permitted_usage,
+      sourceDoc: r.source_doc,
+      version: r.version,
+      status: r.status,
+    })),
+  };
+}
+
+async function saveKlbBook(env, access, body, isUpdate) {
+  if (access.role !== 'admin') return err(403, 'FORBIDDEN', 'Only the administrator manages KLB books');
+  const bookTitle = String(body.bookTitle || '').trim();
+  const grade = String(body.grade || '').trim();
+  const subjectId = String(body.subjectId || '').trim();
+  if (!bookTitle || !grade || !subjectId) return err(400, 'VALIDATION', 'Book title, grade and subject are required');
+  const values = [
+    String(body.publisher || ''),
+    bookTitle,
+    grade,
+    String(body.level || ''),
+    subjectId,
+    String(body.edition || ''),
+    String(body.year || ''),
+    String(body.isbn || ''),
+    String(body.licenseInfo || ''),
+    String(body.permittedUsage || ''),
+    String(body.sourceDoc || ''),
+    String(body.version || '1.0'),
+    String(body.status || 'active'),
+  ];
+  if (isUpdate) {
+    const id = String(body.id || '');
+    await env.DB.prepare(
+      `UPDATE klb_books SET publisher=?, book_title=?, grade=?, level=?, subject_id=?, edition=?, year=?, isbn=?,
+              license_info=?, permitted_usage=?, source_doc=?, version=?, status=?, updated_at=datetime('now')
+       WHERE id=? AND tenant_id=?`,
+    ).bind(...values, id, access.tenant.id).run();
+    return json({ ok: true });
+  }
+  const id = `klb_${uuid()}`;
+  await env.DB.prepare(
+    `INSERT INTO klb_books (id, tenant_id, publisher, book_title, grade, level, subject_id, edition, year, isbn,
+       license_info, permitted_usage, source_doc, version, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, access.tenant.id, ...values).run();
+  return json({ book: { id } }, { status: 201 });
+}
+
+async function listKlbTopics(env, access, q) {
+  const clauses = ['t.tenant_id = ?'];
+  const binds = [access.tenant.id];
+  if (q.get('bookId')) { clauses.push('t.book_id = ?'); binds.push(q.get('bookId')); }
+  if (q.get('grade')) { clauses.push('t.grade = ?'); binds.push(q.get('grade')); }
+  if (q.get('subject')) { clauses.push('t.subject_id = ?'); binds.push(q.get('subject')); }
+  if (q.get('term')) { clauses.push('t.term = ?'); binds.push(q.get('term')); }
+  const res = await env.DB.prepare(
+    `SELECT t.*, b.book_title, b.publisher
+       FROM klb_topics t LEFT JOIN klb_books b ON b.id = t.book_id
+      WHERE ${clauses.join(' AND ')} ORDER BY t.lesson_seq, t.topic`,
+  ).bind(...binds).all();
+  return {
+    topics: res.results.map((r) => ({
+      id: r.id,
+      bookId: r.book_id,
+      bookTitle: r.book_title,
+      publisher: r.publisher,
+      grade: r.grade,
+      subjectId: r.subject_id,
+      term: r.term,
+      topic: r.topic,
+      subtopic: r.subtopic,
+      lessonSeq: r.lesson_seq,
+      strand: r.strand,
+      subStrand: r.sub_strand,
+      outcomes: r.outcomes ? JSON.parse(r.outcomes) : [],
+      activities: r.activities ? JSON.parse(r.activities) : [],
+      experiences: r.experiences ? JSON.parse(r.experiences) : [],
+      resources: r.resources ? JSON.parse(r.resources) : [],
+      assessment: r.assessment ? JSON.parse(r.assessment) : [],
+      pageRefs: r.page_refs,
+      week: r.week,
+    })),
+  };
+}
+
+async function saveKlbTopic(env, access, body, isUpdate) {
+  if (access.role !== 'admin') return err(403, 'FORBIDDEN', 'Only the administrator manages KLB content');
+  const topic = String(body.topic || '').trim();
+  if (!topic) return err(400, 'VALIDATION', 'Topic is required');
+  const values = [
+    String(body.bookId || ''),
+    String(body.grade || ''),
+    String(body.subjectId || ''),
+    String(body.term || ''),
+    topic,
+    String(body.subtopic || ''),
+    Number(body.lessonSeq || 0),
+    String(body.strand || ''),
+    String(body.subStrand || ''),
+    JSON.stringify(Array.isArray(body.outcomes) ? body.outcomes : []),
+    JSON.stringify(Array.isArray(body.activities) ? body.activities : []),
+    JSON.stringify(Array.isArray(body.experiences) ? body.experiences : []),
+    JSON.stringify(Array.isArray(body.resources) ? body.resources : []),
+    JSON.stringify(Array.isArray(body.assessment) ? body.assessment : []),
+    String(body.pageRefs || ''),
+    body.week ? Number(body.week) : null,
+  ];
+  if (isUpdate) {
+    const id = String(body.id || '');
+    await env.DB.prepare(
+      `UPDATE klb_topics SET book_id=?, grade=?, subject_id=?, term=?, topic=?, subtopic=?, lesson_seq=?,
+              strand=?, sub_strand=?, outcomes=?, activities=?, experiences=?, resources=?, assessment=?,
+              page_refs=?, week=?, updated_at=datetime('now')
+       WHERE id=? AND tenant_id=?`,
+    ).bind(...values, id, access.tenant.id).run();
+    return json({ ok: true });
+  }
+  const id = `klbt_${uuid()}`;
+  await env.DB.prepare(
+    `INSERT INTO klb_topics (id, tenant_id, book_id, grade, subject_id, term, topic, subtopic, lesson_seq,
+       strand, sub_strand, outcomes, activities, experiences, resources, assessment, page_refs, week)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, access.tenant.id, ...values).run();
+  return json({ topic: { id } }, { status: 201 });
+}
+
+/* ------------------------------------------- approved material references */
+
+/**
+ * Bibliographic pointers to material KICD has approved or published, verified
+ * against kicd.ac.ke on 2026-10-28. Nothing is hosted here: KICD's site is
+ * "All Rights Reserved", so an approval listing does not grant redistribution.
+ */
+const RESOURCE_SEED = [
+  {
+    category: 'curriculum_design',
+    title: 'CBC Materials',
+    level: '', grade: '', learningArea: '',
+    note: 'KICD hub linking curriculum designs, approved learning materials, teacher education resources and parental engagement guidelines.',
+    url: 'https://kicd.ac.ke/cbc-materials/', versionDate: '',
+  },
+  {
+    category: 'curriculum_design',
+    title: 'Curriculum Designs',
+    level: '', grade: '', learningArea: '',
+    note: 'Index of curriculum designs for regular learners and for learners with special needs.',
+    url: 'https://kicd.ac.ke/cbc-materials/curriculum-designs/', versionDate: '',
+  },
+  {
+    category: 'curriculum_design',
+    title: 'Regular Curriculum Designs',
+    level: 'Lower Primary', grade: 'Grade 1', learningArea: '',
+    note: 'Navigation table for Pre-Primary, Lower Primary and Upper Primary designs.',
+    url: 'https://kicd.ac.ke/cbc-materials/curriculum-designs/regular-curriculum-designs/', versionDate: '',
+  },
+  {
+    category: 'curriculum_design',
+    title: 'Lower Primary Curriculum Designs, Volume 1',
+    level: 'Lower Primary', grade: 'Grade 1', learningArea: '',
+    note: 'Official design volume carrying the lower-primary designs (four volumes).',
+    url: 'https://kicd.ac.ke/wp-content/uploads/2017/10/Volume-1-curriculum-designs-September-2017.pdf', versionDate: '2017-09',
+  },
+  {
+    category: 'course_book',
+    title: 'Approved CBC Course Materials (PP1, PP2 & Grades 1-9)',
+    level: 'Lower Primary', grade: 'Grade 1', learningArea: '',
+    note: 'KICD list of approved course books. Consult the list for publisher and approval details; files are not stored here.',
+    url: 'https://kicd.ac.ke/cbc-materials/approved-cbc-course-materials/', versionDate: '',
+  },
+  {
+    category: 'complementary',
+    title: 'Approved Complementary Materials',
+    level: '', grade: '', learningArea: '',
+    note: 'KICD list of approved complementary materials alongside the core course books.',
+    url: 'https://kicd.ac.ke/cbc-materials/approved-complementary-materials/', versionDate: '',
+  },
+  {
+    category: 'parent',
+    title: 'Guidelines on Parental Empowerment and Engagement',
+    level: '', grade: '', learningArea: '',
+    note: 'Official guidance for home-school communication and parental engagement.',
+    url: 'https://kicd.ac.ke/cbc-materials/guidelines-on-parental-empowerment-and-engagement/', versionDate: '',
+  },
+];
+const RESOURCE_CHECKED_ON = '2026-10-28';
+const RESOURCE_CATEGORIES = ['curriculum_design', 'course_book', 'complementary', 'teacher', 'parent'];
+
+async function ensureResourceLibrary(env, tenantId) {
+  const count = await env.DB.prepare('SELECT COUNT(*) AS n FROM approved_resources WHERE tenant_id = ?')
+    .bind(tenantId).first();
+  if ((count?.n ?? 0) > 0) return;
+  await env.DB.batch(RESOURCE_SEED.map((r, i) => env.DB.prepare(
+    `INSERT OR IGNORE INTO approved_resources
+       (id, tenant_id, category, title, publisher, level, grade, learning_area,
+        approval_note, source_url, version_date, last_checked_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(
+    `res_seed_${i + 1}`, tenantId, r.category, r.title,
+    'Kenya Institute of Curriculum Development', r.level, r.grade, r.learningArea,
+    r.note, r.url, r.versionDate, RESOURCE_CHECKED_ON,
+  )));
+}
+
+function resourceToJson(r) {
+  return {
+    id: r.id, category: r.category, title: r.title, publisher: r.publisher,
+    level: r.level, grade: r.grade, learningArea: r.learning_area,
+    approvalNote: r.approval_note, sourceUrl: r.source_url,
+    versionDate: r.version_date, lastCheckedAt: r.last_checked_at,
+    status: r.status || 'active',
+  };
+}
+
+async function listResources(env, access, q) {
+  await ensureResourceLibrary(env, access.tenant.id);
+  const clauses = ['tenant_id = ?'];
+  const binds = [access.tenant.id];
+  if (q.get('category')) {
+    if (!RESOURCE_CATEGORIES.includes(q.get('category'))) return err(400, 'VALIDATION', 'Unknown category');
+    clauses.push('category = ?'); binds.push(q.get('category'));
+  }
+  if (q.get('level')) { clauses.push('level = ?'); binds.push(q.get('level')); }
+  if (q.get('grade')) { clauses.push('grade = ?'); binds.push(q.get('grade')); }
+  if (q.get('learningArea')) { clauses.push('learning_area = ?'); binds.push(q.get('learningArea')); }
+  if (q.get('q')) {
+    clauses.push('(title LIKE ? OR publisher LIKE ? OR approval_note LIKE ? OR learning_area LIKE ?)');
+    const like = `%${q.get('q')}%`;
+    binds.push(like, like, like, like);
+  }
+  if (q.get('includeDisabled') !== '1') clauses.push("status <> 'disabled'");
+  const res = await env.DB.prepare(
+    `SELECT * FROM approved_resources WHERE ${clauses.join(' AND ')} ORDER BY category, level, title`,
+  ).bind(...binds).all();
+  return {
+    categories: RESOURCE_CATEGORIES,
+    checkedOn: RESOURCE_CHECKED_ON,
+    resources: res.results.map(resourceToJson),
+  };
+}
+
+async function saveResource(env, access, body, isUpdate) {
+  if (access.role !== 'admin') return err(403, 'FORBIDDEN', 'Only the administrator maintains curriculum sources');
+  const title = String(body.title || '').trim();
+  const category = String(body.category || '');
+  const url = String(body.sourceUrl || '').trim();
+  if (!title || !category) return err(400, 'VALIDATION', 'Title and category are required');
+  if (!RESOURCE_CATEGORIES.includes(category)) return err(400, 'VALIDATION', 'Unknown category');
+  if (url && !/^https:\/\//.test(url)) return err(400, 'VALIDATION', 'Link must be an https URL');
+  const status = String(body.status || 'active');
+  if (!['active', 'disabled'].includes(status)) return err(400, 'VALIDATION', 'Status must be active or disabled');
+  const values = [
+    category, title, String(body.publisher || '').slice(0, 200),
+    String(body.level || ''), String(body.grade || ''), String(body.learningArea || '').slice(0, 120),
+    String(body.approvalNote || '').slice(0, 1000), url,
+    String(body.versionDate || '').slice(0, 40), String(body.lastCheckedAt || '').slice(0, 40), status,
+  ];
+  if (isUpdate) {
+    const id = String(body.id || '');
+    await env.DB.prepare(
+      `UPDATE approved_resources SET category = ?, title = ?, publisher = ?, level = ?, grade = ?,
+              learning_area = ?, approval_note = ?, source_url = ?, version_date = ?,
+              last_checked_at = ?, status = ?, updated_at = datetime('now')
+        WHERE id = ? AND tenant_id = ?`,
+    ).bind(...values, id, access.tenant.id).run();
+    return json({ ok: true });
+  }
+  const id = `res_${uuid()}`;
+  await env.DB.prepare(
+    `INSERT INTO approved_resources
+       (id, tenant_id, category, title, publisher, level, grade, learning_area,
+        approval_note, source_url, version_date, last_checked_at, status)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).bind(id, access.tenant.id, ...values).run();
+  return json({ resource: { id } }, { status: 201 });
+}
+
+async function deleteResource(env, access, body) {
+  if (access.role !== 'admin') return err(403, 'FORBIDDEN', 'Only the administrator maintains curriculum sources');
+  const id = String(body.id || '');
+  await env.DB.prepare('DELETE FROM approved_resources WHERE id = ? AND tenant_id = ?')
     .bind(id, access.tenant.id).run();
   return json({ ok: true });
 }
@@ -1895,7 +2481,7 @@ async function handleApi(request, env, user) {
   }
 
   // ---- administrator-only surface
-  if (ADMIN_PATHS.includes(path) && access.role !== 'admin') {
+  if (ADMIN_PATHS.some((p) => path === p || path.startsWith(`${p}/`)) && access.role !== 'admin') {
     return err(403, 'FORBIDDEN', 'Administrator access required');
   }
   if (path === '/api/staff' && method === 'GET') return json({ staff: await staffWithGrants(env, tenant.id) });
@@ -1989,6 +2575,26 @@ async function handleApi(request, env, user) {
     if (method === 'DELETE') return deleteKicd(env, access, body);
   }
 
+  // ---- approved-material reference index: metadata and links only
+  if (path === '/api/resources') {
+    if (method === 'GET') return json(await listResources(env, access, q));
+    if (method === 'POST') return saveResource(env, access, body, false);
+    if (method === 'PUT') return saveResource(env, access, body, true);
+    if (method === 'DELETE') return deleteResource(env, access, body);
+  }
+
+  // ---- KLB books and topics
+  if (path === '/api/klb/books') {
+    if (method === 'GET') return json(await listKlbBooks(env, access, q));
+    if (method === 'POST') return saveKlbBook(env, access, body, false);
+    if (method === 'PUT') return saveKlbBook(env, access, body, true);
+  }
+  if (path === '/api/klb/topics') {
+    if (method === 'GET') return json(await listKlbTopics(env, access, q));
+    if (method === 'POST') return saveKlbTopic(env, access, body, false);
+    if (method === 'PUT') return saveKlbTopic(env, access, body, true);
+  }
+
   // ---- learners
   if (path === '/api/learners' && method === 'GET') return json({ learners: await listLearners(env, access) });
   if (path === '/api/learners' && method === 'POST') return createLearner(env, access, body, spec);
@@ -2032,6 +2638,28 @@ async function handleApi(request, env, user) {
     });
   }
   if (path === '/api/observations' && method === 'POST') return saveObservations(env, access, author, body.items);
+
+  // ---- settings
+  if (path === '/api/settings' && method === 'GET') {
+    if (access.role !== 'admin') return err(403, 'FORBIDDEN', 'Admin only');
+    const row = await env.DB.prepare('SELECT * FROM school_settings WHERE tenant_id = ?').bind(tenant.id).first();
+    return json({
+      schoolType: row?.school_type || 'both',
+      streams: row?.streams_config ? JSON.parse(row.streams_config || '[]') : []
+    });
+  }
+  if (path === '/api/settings' && method === 'POST') {
+    if (access.role !== 'admin') return err(403, 'FORBIDDEN', 'Admin only');
+    await env.DB.prepare(
+      `INSERT INTO school_settings (tenant_id, school_type, streams_config)
+       VALUES (?, ?, ?)
+       ON CONFLICT(tenant_id) DO UPDATE SET
+         school_type = excluded.school_type,
+         streams_config = excluded.streams_config,
+         updated_at = datetime('now')`,
+    ).bind(tenant.id, body.schoolType || 'both', JSON.stringify(body.streams || [])).run();
+    return json({ ok: true });
+  }
 
   // ---- fees
   if (path === '/api/payments' && method === 'GET') {
@@ -2083,28 +2711,62 @@ async function handleApi(request, env, user) {
 
 export default {
   async fetch(request, env) {
-    auth ??= createFreebuffAuth({
-      clientId: env.FREEBUFF_CLIENT_ID,
-      issuer: env.FREEBUFF_ISSUER,
-      baseUrl: env.APP_ORIGIN,
-      // Development only: the local wrangler preview serves http://localhost.
-      // The deployed site is https, so this flag stays false there.
-      allowInsecureLocalhost: /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/.test(env.APP_ORIGIN || ''),
-    });
-    // One wrapped app per isolate: /auth/freebuff/* is handled by the SDK.
-    app ??= auth.wrap(async (request, env) => {
-      const url = new URL(request.url);
-      if (url.pathname.startsWith('/api/')) {
+    const url = new URL(request.url);
+    if (url.pathname.startsWith('/api/')) {
+      try {
         await ensureSchema(env);
-        const user = await auth.getUser(request);
-        return handleApi(request, env, user);
+        let user = null;
+        try {
+          if (env.FREEBUFF_CLIENT_ID && env.FREEBUFF_ISSUER) {
+            const a = createFreebuffAuth({
+              clientId: env.FREEBUFF_CLIENT_ID,
+              issuer: env.FREEBUFF_ISSUER,
+              baseUrl: env.APP_ORIGIN || url.origin,
+              allowInsecureLocalhost: /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/.test(env.APP_ORIGIN || url.origin),
+            });
+            user = await a.getUser(request).catch(() => null);
+          }
+        } catch (_) {}
+        return await handleApi(request, env, user);
+      } catch (e) {
+        return json({ error: 'Server error', code: 'INTERNAL', message: String(e?.message || e) }, { status: 500 });
       }
-      const res = await env.ASSETS.fetch(request);
-      if (res.status === 404 && !url.pathname.startsWith('/auth/')) {
-        return env.ASSETS.fetch(new Request(new URL('/', url.origin)));
+    }
+    if (env.ASSETS) {
+      try {
+        const res = await env.ASSETS.fetch(request);
+        const urlPath = url.pathname;
+        const hasFileExt = /\.[a-zA-Z0-9]+$/.test(urlPath);
+        if (hasFileExt) {
+          const ct = res.headers.get('content-type') || '';
+          if (res.status === 404) {
+            return new Response('Not Found', { status: 404 });
+          }
+          if (res.status === 200 && ct.includes('text/html')) {
+            // Don't serve HTML for asset files
+            return new Response('Not Found', { status: 404 });
+          }
+          return res;
+        }
+        if (res.status === 404 || ((res.headers.get('content-type') || '').includes('text/html') && urlPath !== '/')) {
+          try {
+            const indexRes = await env.ASSETS.fetch(new Request(new URL('/index.html', url.origin)));
+            if (indexRes && indexRes.status === 200) return indexRes;
+          } catch (_) {}
+        }
+        return res;
+      } catch (e) {
+        const hasFileExt = /\.[a-zA-Z0-9]+$/.test(url.pathname);
+        if (!hasFileExt) {
+          try {
+            return await env.ASSETS.fetch(new Request(new URL('/index.html', url.origin)));
+          } catch (_) {
+            return new Response('Site unavailable', { status: 500 });
+          }
+        }
+        return new Response('Not Found', { status: 404 });
       }
-      return res;
-    });
-    return app(request, env);
+    }
+    return new Response('Site unavailable', { status: 500 });
   },
 };

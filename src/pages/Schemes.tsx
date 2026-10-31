@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CalendarRange, Plus, Pencil, Trash2, Download } from 'lucide-react';
+import { CalendarRange, Plus, Pencil, Trash2, Download, Target, Check, Circle, BookOpen, FileText } from 'lucide-react';
 import { api, ApiError } from '../lib/api';
 import type { AppCtx } from '../lib/context';
 import type { KicdDesign, SchemeRow } from '../lib/types';
@@ -76,13 +76,77 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
 
   const terms = useMemo(() => [...new Set(rows.map((r) => r.term))], [rows]);
 
+  /* ---- outcome coverage: what the schemes already address, what is left ----
+   * The curriculum design says what should be taught; these rows say what this
+   * class has actually been planned for. Comparing them is how a teacher sees
+   * coverage instead of rereading the design every week.
+   */
+  const [coverageDesigns, setCoverageDesigns] = useState<KicdDesign[]>([]);
+  const [coverageLoading, setCoverageLoading] = useState(false);
+  const coverageScope = filterStream !== 'All Streams' && !!filterSubject;
+
+  useEffect(() => {
+    if (!coverageScope) {
+      setCoverageDesigns([]);
+      return;
+    }
+    let cancelled = false;
+    setCoverageLoading(true);
+    api
+      .get<{ designs: KicdDesign[] }>(
+        `/api/kicd?category=regular&level=${encodeURIComponent(levelOf(filterStream))}` +
+          `&subject=${encodeURIComponent(filterSubject)}`,
+      )
+      .then((r) => { if (!cancelled) setCoverageDesigns(r.designs || []); })
+      .catch(() => { if (!cancelled) setCoverageDesigns([]); })
+      .finally(() => { if (!cancelled) setCoverageLoading(false); });
+    return () => { cancelled = true; };
+  }, [coverageScope, filterStream, filterSubject]);
+
+  const coveredLines = useMemo(() => {
+    const norm = (s: string) =>
+      s.trim().toLowerCase().replace(/^[•\-–*]\s*/, '').replace(/\s+/g, ' ');
+    const out: string[] = [];
+    for (const r of visible) {
+      for (const line of (r.outcomes || '').split('\n')) {
+        const t = norm(line);
+        if (t) out.push(t);
+      }
+    }
+    return out;
+  }, [visible]);
+
+  const isCovered = (outcome: string) => {
+    const t = outcome.trim().toLowerCase().replace(/\s+/g, ' ');
+    if (t.length < 8) return false;
+    return coveredLines.some((c) => c === t || (t.length >= 12 && c.includes(t)));
+  };
+
+  const coverageTotals = useMemo(() => {
+    let total = 0;
+    let done = 0;
+    for (const d of coverageDesigns) {
+      for (const o of d.outcomes) {
+        if (!o.trim()) continue;
+        total += 1;
+        if (isCovered(o)) done += 1;
+      }
+    }
+    return { total, done };
+  }, [coverageDesigns, coveredLines]);
+
   const openNew = () => {
-    const stream = streams[0] || STREAMS[0];
+    const stream = filterStream !== 'All Streams' ? filterStream : (streams[0] || STREAMS[0]);
+    const subjects = subjectsForStream(stream);
+    const subjectId = filterSubject || subjects[0]?.id || '';
     setDraft({
-      stream, subjectId: subjectsForStream(stream)[0].id, term: defaultTerm(),
+      stream, subjectId, term: filterTerm || defaultTerm(),
       week: 1, strand: '', subStrand: '', outcomes: '', experiences: '',
       inquiry: '', resources: '', assessment: '', remarks: '',
     });
+    if (stream && subjectId) {
+      void fetchDesigns(stream, subjectId);
+    }
   };
 
   const openEdit = (row: SchemeRow) => setDraft({
@@ -105,6 +169,7 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
         strand: d.strand,
         subStrand: d.subStrand,
         outcomes: d.outcomes.join('\n'),
+        experiences: d.experiences.join('\n'),
         inquiry: d.inquiry.join('\n'),
         resources: d.resources.join(', '),
         assessment: d.standards.join(', '),
@@ -156,6 +221,52 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
     }
   };
 
+  const generateLessonPlan = async (row: SchemeRow) => {
+    try {
+      const content: Record<string, string> = {};
+      if (row.outcomes) content['learning_outcomes'] = row.outcomes;
+      if (row.experiences) content['introduction_activities'] = row.experiences;
+      if (row.inquiry) content['key_inquiry_questions'] = row.inquiry;
+      if (row.resources) content['learning_resources'] = row.resources;
+      if (row.assessment) content['assessment'] = row.assessment;
+      if (row.remarks) content['teacher_reflection'] = row.remarks;
+      content['strand_substrand'] = [row.strand, row.subStrand].filter(Boolean).join(' → ');
+      
+      await api.post('/api/lesson-plans', {
+        stream: row.stream,
+        subjectId: row.subjectId,
+        lessonDate: new Date().toISOString().slice(0, 10),
+        topic: row.subStrand || row.strand || row.outcomes.split('\n')[0] || `Week ${row.week} Lesson`,
+        subStrand: row.subStrand,
+        content
+      });
+      ctx.toast('Lesson plan generated from scheme');
+      ctx.navigate('lesson_plans');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to generate lesson plan');
+    }
+  };
+
+  const generateRecordOfWork = async (row: SchemeRow) => {
+    try {
+      await api.post('/api/recordwork', {
+        stream: row.stream,
+        subjectId: row.subjectId,
+        day: new Date().toISOString().slice(0, 10),
+        topic: row.subStrand || row.strand || row.outcomes.split('\n')[0] || `Week ${row.week}`,
+        strand: [row.strand, row.subStrand].filter(Boolean).join(' → '),
+        classSize: 0,
+        absences: '',
+        homework: row.resources ? `Use: ${row.resources}` : '',
+        remarks: row.remarks || row.outcomes
+      });
+      ctx.toast('Record of work created from scheme');
+      ctx.navigate('recordwork');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to create record of work');
+    }
+  };
+
   const subjectName = (id: string) => SUBJECT_BY_ID[id]?.name || id;
 
   return (
@@ -190,6 +301,76 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
 
       {error && <ErrorNote message={error} />}
 
+      <Panel title="Curriculum outcome coverage" icon={<Target className="w-4 h-4" />}>
+        {!coverageScope ? (
+          <EmptyState
+            icon={<Target className="w-6 h-6" />}
+            title="Pick a class and a learning area"
+            hint="Choose one class and one learning area in the filters above to compare your scheme rows against the curriculum outcomes for that grade."
+          />
+        ) : coverageLoading ? (
+          <Loading label="Loading curriculum outcomes" />
+        ) : coverageDesigns.length === 0 ? (
+          <EmptyState
+            icon={<Target className="w-6 h-6" />}
+            title="No designs for this combination"
+            hint="Add a KICD design for this level and learning area under KICD Designs to track coverage."
+          />
+        ) : (
+          <div className="space-y-4">
+            <div className="flex flex-wrap items-center gap-3">
+              <span className="font-mono text-lg font-bold text-white">
+                {coverageTotals.done}/{coverageTotals.total}
+              </span>
+              <span className="text-xs text-slate-400">
+                outcomes planned in schemes for {filterStream} · {subjectName(filterSubject)}
+                {filterTerm ? ` · ${filterTerm}` : ''}
+              </span>
+              <div className="h-2 flex-1 min-w-[120px] overflow-hidden rounded-full bg-slate-800">
+                <div
+                  className="h-full rounded-full bg-emerald-500 transition-all"
+                  style={{
+                    width: `${coverageTotals.total ? Math.round((coverageTotals.done / coverageTotals.total) * 100) : 0}%`,
+                  }}
+                />
+              </div>
+            </div>
+
+            {coverageDesigns.map((d) => (
+              <div key={d.id} className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-sm font-semibold text-white">
+                    {d.strand}{d.subStrand ? ` → ${d.subStrand}` : ''}
+                  </div>
+                  <span className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide ${
+                    d.origin === 'kicd'
+                      ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300'
+                      : d.origin === 'sample'
+                        ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
+                        : 'border-sky-500/30 bg-sky-500/10 text-sky-300'
+                  }`}>
+                    {d.origin === 'kicd' ? 'Official KICD' : d.origin === 'sample' ? 'Sample data' : 'School entered'}
+                  </span>
+                </div>
+                <ul className="mt-2 space-y-1.5">
+                  {d.outcomes.filter((o) => o.trim()).map((o, i) => {
+                    const done = isCovered(o);
+                    return (
+                      <li key={`${d.id}-${i}`} className="flex items-start gap-2 text-[11px] leading-relaxed">
+                        <span className={`mt-0.5 shrink-0 ${done ? 'text-emerald-400' : 'text-slate-600'}`}>
+                          {done ? <Check className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
+                        </span>
+                        <span className={done ? 'text-slate-300' : 'text-slate-500'}>{o}</span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+
       <Panel
         title={`Scheme rows (${visible.length})`}
         icon={<CalendarRange className="w-4 h-4" />}
@@ -214,7 +395,13 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
                       <span className="text-xs font-semibold text-white">{subjectName(row.subjectId)}</span>
                       <span className="text-[11px] text-slate-500">{row.term} · by {row.author}</span>
                     </div>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 flex-wrap">
+                      <button className={btnGhost} onClick={() => void generateLessonPlan(row)} title="Auto-generate lesson plan">
+                        <BookOpen className="w-3.5 h-3.5" /> Generate Lesson Plan
+                      </button>
+                      <button className={btnGhost} onClick={() => void generateRecordOfWork(row)} title="Create record of work">
+                        <FileText className="w-3.5 h-3.5" /> Generate R.O.W
+                      </button>
                       <button className={btnGhost} onClick={() => openEdit(row)}>
                         <Pencil className="w-3.5 h-3.5" /> Edit
                       </button>
@@ -284,15 +471,56 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
             </div>
 
             {!draft.id && designs.length > 0 && (
-              <div>
-                <label className={labelCls} htmlFor="sc-design">Pre-fill from a KICD curriculum design</label>
-                <select id="sc-design" className={selectCls} value=""
-                  onChange={(e) => void loadDesign(e.target.value)}>
-                  <option value="">Choose a design…</option>
-                  {designs.map((d) => (
-                    <option key={d.id} value={d.id}>{d.strand}{d.subStrand ? ` → ${d.subStrand}` : ''}</option>
-                  ))}
-                </select>
+              <div className="space-y-3 p-3 bg-slate-900/50 rounded-xl border border-slate-700">
+                <div className="flex items-center gap-2">
+                  <BookOpen className="w-4 h-4 text-indigo-400" />
+                  <label className="text-sm font-semibold text-white">Select from KICD Curriculum</label>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className={labelCls}>Strand</label>
+                    <select 
+                      className={selectCls} 
+                      value={draft.strand}
+                      onChange={(e) => {
+                        const strand = e.target.value;
+                        setDraft({ ...draft, strand, subStrand: '' });
+                      }}
+                    >
+                      <option value="">Select Strand</option>
+                      {[...new Set(designs.map(d => d.strand).filter(Boolean))].map(s => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className={labelCls}>Sub-Strand</label>
+                    <select 
+                      className={selectCls} 
+                      value={draft.subStrand}
+                      onChange={(e) => {
+                        const subStrand = e.target.value;
+                        setDraft({ ...draft, subStrand });
+                        const matching = designs.find(d => d.strand === draft.strand && d.subStrand === subStrand);
+                        if (matching) {
+                          void loadDesign(matching.id);
+                        }
+                      }}
+                      disabled={!draft.strand}
+                    >
+                      <option value="">Select Sub-Strand</option>
+                      {designs
+                        .filter(d => !draft.strand || d.strand === draft.strand)
+                        .map(d => d.subStrand)
+                        .filter(Boolean)
+                        .filter((v, i, arr) => arr.indexOf(v) === i)
+                        .map(s => (
+                          <option key={s} value={s}>{s}</option>
+                        ))}
+                    </select>
+                  </div>
+                </div>
+                <p className="text-[10px] text-slate-500">Select strand and sub-strand from KICD to auto-fill learning outcomes, experiences, inquiry questions, resources and assessment.</p>
               </div>
             )}
 

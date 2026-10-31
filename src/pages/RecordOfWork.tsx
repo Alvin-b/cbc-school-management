@@ -28,7 +28,7 @@ interface RowData {
   homework: string;
   remarks: string;
   author: string;
-  createdAt: string;
+  staffId: string;
   updatedAt: string;
 }
 
@@ -45,7 +45,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
     setLoading(true);
     setError('');
     try {
-      const res = await api.get<{ rows: RowData[] }>('/api/recordofwork');
+      const res = await api.get<{ rows: RowData[] }>('/api/recordwork');
       setRows(res.rows);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Failed to load record of work');
@@ -57,10 +57,14 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
   useEffect(() => { void load(); }, [load]);
 
   const filterRows = (rows: RowData[]) =>
-    rows.filter((r) =>
-      (ctx.session.streams === null || ctx.session.streams.includes(r.stream)) &&
-      (r.staffId === ctx.session.user?.sub || ctx.session.role === 'admin')
-    );
+    rows.filter((r) => {
+      if (ctx.session.streams !== null && !ctx.session.streams.includes(r.stream)) return false;
+      if (ctx.session.role === 'admin') return true;
+      // Mirrors canEditRow on the server: a teacher sees their own rows plus the
+      // ones the admin left unassigned. Comparing against user.sub never matches
+      // because staff sessions carry a `staff:`-prefixed subject.
+      return !r.staffId || r.staffId === ctx.session.staff?.id;
+    });
 
   const openForm = (row?: RowData) => {
     const data: RowForm = {
@@ -74,8 +78,11 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
       homework: row?.homework || '',
       remarks: row?.remarks || '',
     };
-    if (row) setEditing(row);
-    else setForm(data);
+    // Always populate the form: leaving it null in edit mode meant the first
+    // keystroke replaced it with a partial object, dropping every other field
+    // from the payload when saving.
+    setEditing(row ?? null);
+    setForm(data);
   };
 
   const save = async () => {
@@ -85,10 +92,10 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
     try {
       if (form.stream && form.day && form.topic) {
         if (editing && editing.id) {
-          await api.put('/api/recordofwork', { ...form, id: editing.id });
+          await api.put('/api/recordwork', { ...form, id: editing.id });
           ctx.toast('Record updated');
         } else {
-          await api.post('/api/recordofwork', form);
+          await api.post('/api/recordwork', form);
           ctx.toast('Record added');
         }
       } else {
@@ -107,7 +114,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
   const remove = async (id: string) => {
     if (!window.confirm('Delete this record of work entry?')) return;
     try {
-      await api.del('/api/recordofwork', { id });
+      await api.del('/api/recordwork', { id });
       ctx.toast('Record deleted');
       await load();
     } catch (err) {
@@ -125,7 +132,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
         icon={<Calendar className="w-5 h-5" />}
         actions={
           ctx.session.role === 'admin' ? (
-            <button className={btnPrimary} onClick={openForm}>
+            <button className={btnPrimary} onClick={() => openForm()}>
               <Plus className="w-4 h-4" /> Add record
             </button>
           ) : null
@@ -164,10 +171,10 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   </div>
                   {ctx.session.role === 'admin' && (
                     <div className="text-right">
-                      <button className={btnGhost} size="small" onClick={() => openForm(row)}>
+                      <button className={btnGhost} onClick={() => openForm(row)}>
                         <Edit className="w-3 h-3" /> Edit
                       </button>
-                      <button className={btnGhost} size="small" onClick={() => void remove(row.id)}>
+                      <button className={btnGhost} onClick={() => void remove(row.id)}>
                         <Trash2 className="w-3 h-3" /> Delete
                       </button>
                     </div>
@@ -195,7 +202,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   id="row-stream"
                   className={selectCls}
                   value={form?.stream || editing?.stream || ''}
-                  onChange={(e) => setForm({ ...form, stream: e.target.value })}
+                  onChange={(e) => setForm((f) => (f ? { ...f, stream: e.target.value } : f))}
                 >
                   {ctx.session.streams ? ctx.session.streams.map((s) => (
                     <option key={s} value={s}>{s}</option>
@@ -208,7 +215,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   id="row-subject"
                   className={selectCls}
                   value={form?.subjectId || editing?.subjectId || ''}
-                  onChange={(e) => setForm({ ...form, subjectId: e.target.value })}
+                  onChange={(e) => setForm((f) => (f ? { ...f, subjectId: e.target.value } : f))}
                 >
                   <option value="">Any</option>
                 </select>
@@ -219,7 +226,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   id="row-day"
                   className={selectCls}
                   value={form?.day || editing?.day || ''}
-                  onChange={(e) => setForm({ ...form, day: e.target.value })}
+                  onChange={(e) => setForm((f) => (f ? { ...f, day: e.target.value } : f))}
                 >
                   <option value="Monday">Monday</option>
                   <option value="Tuesday">Tuesday</option>
@@ -234,7 +241,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   id="row-topic"
                   className={inputCls}
                   value={form?.topic || editing?.topic || ''}
-                  onChange={(e) => setForm({ ...form, topic: e.target.value })}
+                  onChange={(e) => setForm((f) => (f ? { ...f, topic: e.target.value } : f))}
                 />
               </div>
             </div>
@@ -246,7 +253,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   id="row-strand"
                   className={inputCls}
                   value={form?.strand || editing?.strand || ''}
-                  onChange={(e) => setForm({ ...form, strand: e.target.value })}
+                  onChange={(e) => setForm((f) => (f ? { ...f, strand: e.target.value } : f))}
                 />
               </div>
               <div>
@@ -257,7 +264,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   min={0}
                   className={inputCls}
                   value={(form?.classSize ?? editing?.classSize ?? 0)}
-                  onChange={(e) => setForm({ ...form, classSize: Number(e.target.value) })}
+                  onChange={(e) => setForm((f) => (f ? { ...f, classSize: Number(e.target.value) } : f))}
                 />
               </div>
               <div>
@@ -266,7 +273,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   id="row-absences"
                   className={inputCls}
                   value={form?.absences || editing?.absences || ''}
-                  onChange={(e) => setForm({ ...form, absences: e.target.value })}
+                  onChange={(e) => setForm((f) => (f ? { ...f, absences: e.target.value } : f))}
                 />
               </div>
               <div>
@@ -275,7 +282,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   id="row-homework"
                   className={inputCls}
                   value={form?.homework || editing?.homework || ''}
-                  onChange={(e) => setForm({ ...form, homework: e.target.value })}
+                  onChange={(e) => setForm((f) => (f ? { ...f, homework: e.target.value } : f))}
                 />
               </div>
             </div>
@@ -287,7 +294,7 @@ export default function RecordOfWork({ ctx }: { ctx: AppCtx }) {
                   id="row-remarks"
                   className={`${inputCls} min-h-[80px] leading-relaxed`}
                   value={form?.remarks || editing?.remarks || ''}
-                  onChange={(e) => setForm({ ...form, remarks: e.target.value })}
+                  onChange={(e) => setForm((f) => (f ? { ...f, remarks: e.target.value } : f))}
                 />
               </div>
             </div>

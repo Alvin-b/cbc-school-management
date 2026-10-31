@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS lesson_plans (
   subject_id  TEXT NOT NULL,
   lesson_date TEXT NOT NULL,
   topic       TEXT NOT NULL,
+  sub_strand  TEXT NOT NULL DEFAULT '',
   content     TEXT NOT NULL,
   created_at  TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
@@ -231,7 +232,7 @@ CREATE TABLE IF NOT EXISTS timetable_entries (
   created_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_tt_unique
-  ON timetable_entries (tenant_id, day, period);
+  ON timetable_entries (tenant_id, day, period, stream);
 CREATE INDEX IF NOT EXISTS idx_tt_tenant ON timetable_entries (tenant_id, day);
 CREATE INDEX IF NOT EXISTS idx_tt_staff ON timetable_entries (staff_id);
 
@@ -265,6 +266,8 @@ CREATE TABLE IF NOT EXISTS progress_records (
   staff_id    TEXT NOT NULL DEFAULT '',
   author      TEXT NOT NULL DEFAULT '',
   subject_id  TEXT NOT NULL,
+  strand      TEXT NOT NULL DEFAULT '',
+  sub_strand  TEXT NOT NULL DEFAULT '',
   term        TEXT NOT NULL DEFAULT '',
   day         TEXT NOT NULL,
   stage       TEXT NOT NULL,
@@ -300,14 +303,112 @@ CREATE TABLE IF NOT EXISTS kicd_designs (
   strand       TEXT NOT NULL,
   sub_strand   TEXT NOT NULL DEFAULT '',
   outcomes     TEXT NOT NULL DEFAULT '',
+  experiences  TEXT NOT NULL DEFAULT '',
   competencies TEXT NOT NULL DEFAULT '',
   standards    TEXT NOT NULL DEFAULT '',
   inquiry      TEXT NOT NULL DEFAULT '',
   resources    TEXT NOT NULL DEFAULT '',
   inclusive    TEXT NOT NULL DEFAULT '',
+  -- Provenance: where this design came from and when it was last verified.
+  origin       TEXT NOT NULL DEFAULT 'school',   -- kicd | school | sample
+  source_url   TEXT NOT NULL DEFAULT '',
+  source_title TEXT NOT NULL DEFAULT '',
+  version_label TEXT NOT NULL DEFAULT '',
+  version_date TEXT NOT NULL DEFAULT '',
+  last_checked_at TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL DEFAULT 'active',   -- active | disabled
   created_at   TEXT NOT NULL DEFAULT (datetime('now')),
   updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_kicd_tenant ON kicd_designs (tenant_id, category, level);
+
+-- Approved KICD course and complementary materials, held as a reference index.
+-- Only bibliographic metadata and a link back to KICD is stored: approval to
+-- use a book in schools does not grant the right to redistribute the file.
+CREATE TABLE IF NOT EXISTS approved_resources (
+  id           TEXT PRIMARY KEY,
+  tenant_id    TEXT NOT NULL,
+  category     TEXT NOT NULL,             -- curriculum_design | course_book | complementary | teacher | parent
+  title        TEXT NOT NULL,
+  publisher    TEXT NOT NULL DEFAULT '',
+  level        TEXT NOT NULL DEFAULT '',
+  grade        TEXT NOT NULL DEFAULT '',
+  learning_area TEXT NOT NULL DEFAULT '',
+  approval_note TEXT NOT NULL DEFAULT '',
+  source_url   TEXT NOT NULL DEFAULT '',
+  version_date TEXT NOT NULL DEFAULT '',
+  last_checked_at TEXT NOT NULL DEFAULT '',
+  status       TEXT NOT NULL DEFAULT 'active',
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_resources_tenant ON approved_resources (tenant_id, status, level);
+
+-- School settings
+CREATE TABLE IF NOT EXISTS school_settings (
+  tenant_id TEXT PRIMARY KEY,
+  school_type TEXT NOT NULL DEFAULT 'both', -- 'boarding' | 'day' | 'both'
+  streams_config TEXT NOT NULL DEFAULT '[]',
+  updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+-- KLB Books (licensed textbooks)
+CREATE TABLE IF NOT EXISTS klb_books (
+  id           TEXT PRIMARY KEY,
+  tenant_id    TEXT NOT NULL,
+  publisher    TEXT NOT NULL DEFAULT '',
+  book_title   TEXT NOT NULL,
+  grade        TEXT NOT NULL,
+  level        TEXT NOT NULL DEFAULT '',
+  subject_id   TEXT NOT NULL,
+  edition      TEXT NOT NULL DEFAULT '',
+  year         TEXT NOT NULL DEFAULT '',
+  isbn         TEXT NOT NULL DEFAULT '',
+  license_info TEXT NOT NULL DEFAULT '',
+  permitted_usage TEXT NOT NULL DEFAULT '',
+  source_doc   TEXT NOT NULL DEFAULT '',
+  version      TEXT NOT NULL DEFAULT '1.0',
+  status       TEXT NOT NULL DEFAULT 'active',
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_klb_books_tenant ON klb_books (tenant_id, grade, subject_id);
+
+-- KLB Topics/Lessons
+CREATE TABLE IF NOT EXISTS klb_topics (
+  id           TEXT PRIMARY KEY,
+  tenant_id    TEXT NOT NULL,
+  book_id      TEXT NOT NULL,
+  grade        TEXT NOT NULL,
+  subject_id   TEXT NOT NULL,
+  term         TEXT NOT NULL DEFAULT '',
+  topic        TEXT NOT NULL,
+  subtopic     TEXT NOT NULL DEFAULT '',
+  lesson_seq   INTEGER NOT NULL DEFAULT 0,
+  strand       TEXT NOT NULL DEFAULT '',
+  sub_strand   TEXT NOT NULL DEFAULT '',
+  outcomes     TEXT NOT NULL DEFAULT '',
+  activities   TEXT NOT NULL DEFAULT '',
+  experiences  TEXT NOT NULL DEFAULT '',
+  resources    TEXT NOT NULL DEFAULT '',
+  assessment   TEXT NOT NULL DEFAULT '',
+  page_refs    TEXT NOT NULL DEFAULT '',
+  week         INTEGER,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+  updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_klb_topics_tenant ON klb_topics (tenant_id, grade, subject_id, term);
+CREATE INDEX IF NOT EXISTS idx_klb_topics_book ON klb_topics (book_id);
+
+-- Mapping between KICD sub-strands and KLB topics
+CREATE TABLE IF NOT EXISTS kicd_klb_mapping (
+  id           TEXT PRIMARY KEY,
+  tenant_id    TEXT NOT NULL,
+  kicd_design_id TEXT NOT NULL,
+  klb_topic_id TEXT NOT NULL,
+  confidence   INTEGER NOT NULL DEFAULT 100,
+  created_at   TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_kicd_klb_map ON kicd_klb_mapping (tenant_id, kicd_design_id, klb_topic_id);
 
 

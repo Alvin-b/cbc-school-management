@@ -65,6 +65,7 @@ export interface LessonPlan {
   subjectId: string;
   lessonDate: string;
   topic: string;
+  subStrand: string;
   content: Record<string, string>;
   updatedAt: string;
 }
@@ -136,6 +137,8 @@ export interface ProgressRecord {
   staffId: string;
   author: string;
   subjectId: string;
+  strand?: string;
+  subStrand?: string;
   term: string;
   day: string;
   stage: string;
@@ -152,11 +155,89 @@ export interface KicdDesign {
   strand: string;
   subStrand: string;
   outcomes: string[];
+  experiences: string[];
   competencies: string[];
   standards: string[];
   inquiry: string[];
   resources: string[];
   inclusive: string;
+  /** Where this design came from — teachers must be able to tell official
+   *  KICD curriculum apart from school notes and unverified sample data. */
+  origin: 'kicd' | 'school' | 'sample';
+  status: 'active' | 'disabled';
+  sourceUrl: string;
+  sourceTitle: string;
+  versionLabel: string;
+  versionDate: string;
+  lastCheckedAt: string;
+}
+
+export interface KicdSource {
+  key: string;
+  label: string;
+  url: string;
+}
+
+export type ResourceCategory =
+  | 'curriculum_design'
+  | 'course_book'
+  | 'complementary'
+  | 'teacher'
+  | 'parent';
+
+/** Bibliographic pointer to material KICD has approved — never the file. */
+export interface CurriculumResource {
+  id: string;
+  category: ResourceCategory;
+  title: string;
+  publisher: string;
+  level: string;
+  grade: string;
+  learningArea: string;
+  approvalNote: string;
+  sourceUrl: string;
+  versionDate: string;
+  lastCheckedAt: string;
+  status: 'active' | 'disabled';
+}
+
+export interface KlbBook {
+  id: string;
+  publisher: string;
+  bookTitle: string;
+  grade: string;
+  level: string;
+  subjectId: string;
+  edition: string;
+  year: string;
+  isbn: string;
+  licenseInfo: string;
+  permittedUsage: string;
+  sourceDoc: string;
+  version: string;
+  status: string;
+}
+
+export interface KlbTopic {
+  id: string;
+  bookId: string;
+  bookTitle?: string;
+  publisher?: string;
+  grade: string;
+  subjectId: string;
+  term: string;
+  topic: string;
+  subtopic: string;
+  lessonSeq: number;
+  strand: string;
+  subStrand: string;
+  outcomes: string[];
+  activities: string[];
+  experiences: string[];
+  resources: string[];
+  assessment: string[];
+  pageRefs: string;
+  week?: number;
 }
 
 export interface MarkValue {

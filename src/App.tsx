@@ -1,9 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  GraduationCap, Search, Filter, LayoutDashboard, ClipboardCheck, Eye,
+import { useCallback, useEffect, useMemo, useState } from 'react';import { GraduationCap, Search, Filter, LayoutDashboard, ClipboardCheck, Eye,
   CalendarCheck, FileSpreadsheet, Users, Award, GraduationCap as CapIcon,
   CreditCard, MessageSquare, Sparkles, LogOut, Layers, BookOpen, KeyRound, UserCog,
-  CalendarRange, Clock, NotebookPen, TrendingUp, LibraryBig,
+  CalendarRange, Clock, NotebookPen, TrendingUp, LibraryBig, BookMarked, Settings,
 } from 'lucide-react';
 import { api, ApiError, planSpec } from './lib/api';
 import type { Learner, Session } from './lib/types';
@@ -31,6 +29,8 @@ import Timetable from './pages/Timetable';
 import RecordOfWork from './pages/RecordOfWork';
 import Progress from './pages/Progress';
 import KicdDesigns from './pages/KicdDesigns';
+import CurriculumResources from './pages/CurriculumResources';
+import SettingsPage from './pages/Settings';
 
 /**
  * `service` — the service an admin must grant a teacher before this entry
@@ -45,6 +45,7 @@ const NAV_ITEMS = [
   { id: 'recordwork', label: 'Record of Work', icon: NotebookPen, service: 'recordwork' },
   { id: 'progress', label: 'Progress', icon: TrendingUp, service: 'progress' },
   { id: 'kicd', label: 'KICD Designs', icon: LibraryBig, service: 'kicd' },
+  { id: 'resources', label: 'Approved Resources', icon: BookMarked, service: 'kicd' },
   { id: 'observations', label: 'Observations', icon: Eye, service: 'observations' },
   { id: 'attendance', label: 'Attendance', icon: CalendarCheck, service: 'attendance' },
   { id: 'broadsheet', label: 'Broadsheet', icon: FileSpreadsheet, service: 'broadsheet' },
@@ -54,6 +55,7 @@ const NAV_ITEMS = [
   { id: 'fees', label: 'Fee Payments', icon: CreditCard, service: 'fees' },
   { id: 'whatsapp', label: 'WhatsApp', icon: MessageSquare, service: 'whatsapp' },
   { id: 'staff', label: 'Staff & Access', icon: UserCog, adminOnly: true },
+  { id: 'settings', label: 'Settings', icon: Settings, adminOnly: true },
   { id: 'billing', label: 'Plan & Billing', icon: Layers, adminOnly: true },
   { id: 'account', label: 'My Login', icon: KeyRound, teacherOnly: true },
 ];
@@ -69,8 +71,14 @@ const GUEST_SESSION: Session = {
 };
 
 const routeFromHash = () => {
-  const raw = window.location.hash.replace(/^#\/?/, '').split('?')[0];
-  return NAV_ITEMS.some((n) => n.id === raw) ? raw : 'dashboard';
+  // The app is hash-routed, but people also open /timetable or /progress
+  // directly (the SPA fallback serves index.html for them). Honour a valid
+  // hash first, then fall back to the path so those URLs land on their page.
+  const hash = window.location.hash.replace(/^#\/?/, '').split('?')[0];
+  if (hash && NAV_ITEMS.some((n) => n.id === hash)) return hash;
+  const path = window.location.pathname.replace(/^\/+/, '').split('?')[0];
+  if (path && NAV_ITEMS.some((n) => n.id === path)) return path;
+  return 'dashboard';
 };
 
 export default function App() {
@@ -146,7 +154,13 @@ export default function App() {
   }, []);
 
   const navigate = useCallback((next: string) => {
-    window.location.hash = `#/${next}`;
+    if (window.location.pathname !== '/') {
+      // Arrived via a path route such as /timetable: fold it back to the hash
+      // form so the address bar does not keep two competing routes.
+      history.replaceState(null, '', `${window.location.origin}/#/${next}`);
+    } else {
+      window.location.hash = `#/${next}`;
+    }
     setRoute(next);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   }, []);
@@ -227,6 +241,7 @@ export default function App() {
     recordwork: <RecordOfWork ctx={ctx} />,
     progress: <Progress ctx={ctx} />,
     kicd: <KicdDesigns ctx={ctx} />,
+    resources: <CurriculumResources ctx={ctx} />,
     observations: <Observations ctx={ctx} />,
     attendance: <Attendance ctx={ctx} />,
     broadsheet: <Broadsheet ctx={ctx} />,
@@ -237,6 +252,7 @@ export default function App() {
     whatsapp: <WhatsAppPage ctx={ctx} />,
     billing: <Billing ctx={ctx} />,
     staff: <StaffAccess ctx={ctx} />,
+    settings: <SettingsPage ctx={ctx} />,
     account: <MyLogin ctx={ctx} />,
   };
 
@@ -309,7 +325,7 @@ export default function App() {
           {isAdmin ? (
             <form
               method="post"
-              action={AUTH.signout}
+              action={signInUrl() + "/../auth/freebuff/signout"}
               className="bg-slate-950/80 hover:bg-slate-800 border border-slate-800 p-0 rounded-xl"
               title="Sign out"
             >

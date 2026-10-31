@@ -15,6 +15,7 @@ interface Draft {
   subjectId: string;
   lessonDate: string;
   topic: string;
+  subStrand: string;
   content: Record<string, string>;
 }
 
@@ -69,6 +70,7 @@ export default function LessonPlans({ ctx }: { ctx: AppCtx }) {
       subjectId: subjectList(stream)[0].id,
       lessonDate: today(),
       topic: '',
+      subStrand: '',
       content: {},
     });
   };
@@ -80,6 +82,7 @@ export default function LessonPlans({ ctx }: { ctx: AppCtx }) {
       subjectId: plan.subjectId,
       lessonDate: plan.lessonDate,
       topic: plan.topic,
+      subStrand: plan.subStrand || '',
       content: { ...plan.content },
     });
   };
@@ -119,7 +122,11 @@ export default function LessonPlans({ ctx }: { ctx: AppCtx }) {
   const openTemplateEditor = () => {
     if (!template) return;
     setTplName(template.name);
-    setTplSections(template.sections.map((s) => ({ label: s.label })));
+    setTplSections(
+      template.sections
+        .filter((s) => !/^sub[_\s-]?(strand|topic)$/i.test(s.key))
+        .map((s) => ({ label: s.label })),
+    );
     setTemplateOpen(true);
   };
 
@@ -138,7 +145,10 @@ export default function LessonPlans({ ctx }: { ctx: AppCtx }) {
     }
   };
 
-  const sections = template?.sections || [];
+  // Sub-strand is a first-class field beside the topic, so drop the legacy
+  // template entry for it — otherwise it renders twice on older tenants.
+  const allSections = template?.sections || [];
+  const sections = allSections.filter((s) => !/^sub[_\s-]?(strand|topic)$/i.test(s.key));
   const remarksKey = sections.find((s) => /remark|comment/i.test(s.label))?.key;
 
   return (
@@ -186,6 +196,9 @@ export default function LessonPlans({ ctx }: { ctx: AppCtx }) {
                       <span className="text-[11px] text-slate-500">{plan.lessonDate}</span>
                     </div>
                     <p className="text-sm font-bold text-white truncate">{plan.topic}</p>
+                    {plan.subStrand && (
+                      <p className="text-[11px] text-indigo-300 truncate">{plan.subStrand}</p>
+                    )}
                     <p className="text-[11px] text-slate-500">By {plan.author}</p>
                   </div>
                   <div className="flex items-center gap-2">
@@ -276,8 +289,8 @@ export default function LessonPlans({ ctx }: { ctx: AppCtx }) {
                 <input
                   id="lp-subtopic"
                   className={inputCls}
-                  value={draft.content.subtopic || draft.content.sub_strand || ''}
-                  onChange={(e) => setDraft({ ...draft, content: { ...draft.content, subtopic: e.target.value, sub_strand: e.target.value } })}
+                  value={draft.subStrand}
+                  onChange={(e) => setDraft({ ...draft, subStrand: e.target.value })}
                   placeholder="e.g. Equivalent fractions"
                 />
               </div>

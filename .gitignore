@@ -1,3 +1,1 @@
-/freebuff-sites-build/
-/node_modules
-/node_modules
+node_modules/\ndist/\ndist-worker/\n.wrangler/\n*.sqlite\n*.local\n.DS_Store\n

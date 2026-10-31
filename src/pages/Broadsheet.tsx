@@ -3,7 +3,7 @@ import { FileSpreadsheet, Download, Trophy, AlertTriangle } from 'lucide-react';
 import { api, ApiError, planSpec, PLAN_LIMIT_CODES } from '../lib/api';
 import type { AppCtx } from '../lib/context';
 import type { LearnerMarks } from '../lib/types';
-import { subjectsForStream, rubricFor } from '../lib/curriculum';
+import { subjectsForStream, rubricFor, RUBRIC_LABELS } from '../lib/curriculum';
 import {
   Panel, PageHeader, inputCls, labelCls, btnPrimary, EmptyState, ErrorNote,
   Badge, PlanLock,
@@ -57,10 +57,11 @@ export default function Broadsheet({ ctx }: { ctx: AppCtx }) {
       const marks = byLearner[l.id] || {};
       const scores = subjects.map((s) => marks[s.id]?.score).filter((v): v is number => typeof v === 'number');
       const totalPoints = subjects.reduce((acc, s) => acc + (marks[s.id]?.points || 0), 0);
+      const totalMarks = scores.reduce((a, b) => a + b, 0);
       const average = scores.length
-        ? Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10
+        ? Math.round((totalMarks / scores.length) * 10) / 10
         : null;
-      return { learner: l, marks, average, totalPoints, scored: scores.length };
+      return { learner: l, marks, average, totalPoints, totalMarks, scored: scores.length };
     });
 
     // Rank strictly on performance, then optionally re-sort for display.
@@ -163,8 +164,9 @@ export default function Broadsheet({ ctx }: { ctx: AppCtx }) {
                   {subjects.map((s) => (
                     <th key={s.id} className="p-2 text-center" title={s.name}>{s.code}</th>
                   ))}
+                  <th className="p-3 text-center">Total Marks</th>
                   <th className="p-3 text-center">Average</th>
-                  <th className="p-3 text-center">Points</th>
+                  <th className="p-3 text-center">Performance Level</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-800">
@@ -196,10 +198,21 @@ export default function Broadsheet({ ctx }: { ctx: AppCtx }) {
                         </td>
                       );
                     })}
+                    <td className="p-3 text-center font-semibold text-white">
+                      {row.scored > 0 ? row.totalMarks : '—'}
+                    </td>
                     <td className="p-3 text-center font-bold text-white">
                       {row.average ?? '—'}
                     </td>
-                    <td className="p-3 text-center text-slate-300">{row.totalPoints}</td>
+                    <td className="p-3 text-center">
+                      {row.average !== null ? (
+                        <span className={`font-semibold ${{EE:'text-emerald-400', ME:'text-indigo-300', AE:'text-amber-400', BE:'text-rose-400'}[rubricFor(Math.round(row.average)).rubric]}`} title={RUBRIC_LABELS[rubricFor(Math.round(row.average)).rubric]}>
+                          {rubricFor(Math.round(row.average)).rubric}
+                        </span>
+                      ) : (
+                        <span className="text-slate-600">—</span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
