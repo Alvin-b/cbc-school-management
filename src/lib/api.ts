@@ -27,8 +27,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const body = text ? (() => { try { return JSON.parse(text); } catch { return null; } })() : null;
 
   if (!res.ok) {
-    const msg = (body && (body.message || body.error)) || `Request failed (${res.status})`;
-    throw new ApiError(res.status, (body && body.code) || 'error', msg);
+    const msg =
+      body && typeof body === 'object' && ('message' in body || 'error' in body)
+        ? (body.message || body.error)
+        : body && typeof body === 'string'
+          ? body
+          : `Request failed (${res.status})`;
+    throw new ApiError(res.status, (body && (body.code || (body.error && 'error'))) || 'error', msg);
   }
   return body as T;
 }

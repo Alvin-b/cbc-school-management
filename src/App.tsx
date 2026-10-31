@@ -6,7 +6,7 @@ import { useCallback, useEffect, useMemo, useState } from 'react';import { Gradu
 import { api, ApiError, planSpec } from './lib/api';
 import type { Learner, Session } from './lib/types';
 import type { AppCtx, Toast } from './lib/context';
-import { AUTH } from './lib/auth';
+import { signInUrl } from './lib/auth';
 import { STREAMS } from './lib/curriculum';
 import { Badge } from './components/ui';
 import SignIn from './pages/SignIn';

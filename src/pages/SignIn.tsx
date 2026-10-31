@@ -24,7 +24,8 @@ export default function SignIn({
     setError('');
     try {
       await api.post('/api/auth/login', { username, password });
-      // Session cookie is set: re-read /api/session and enter the dashboard.
+      // Session cookie is set by the worker: re-read /api/session once, then let
+      // the app decide (sign-in redirect / must-change-login gate / dashboard).
       await onRetry();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Sign in failed');
@@ -82,12 +83,12 @@ export default function SignIn({
           </ul>
 
           <div className="flex items-center gap-3 pt-2">
-            <a
-              href={signInUrl()}
-              className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-6 py-3 rounded-2xl text-sm flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/30"
-            >
-              Sign in with Freebuff <ArrowRight className="w-4 h-4" />
-            </a>
+          <a
+            href={`${signInUrl()}/../auth/freebuff/signin?returnTo=${encodeURIComponent('/')}`}
+            className="bg-indigo-600 hover:bg-indigo-500 text-white font-semibold px-6 py-3 rounded-2xl text-sm flex items-center gap-2 transition-all shadow-lg shadow-indigo-600/30"
+          >
+            Sign in with Freebuff <ArrowRight className="w-4 h-4" />
+          </a>
             <button
               onClick={onRetry}
               className="bg-slate-900 hover:bg-slate-800 border border-slate-800 text-slate-300 font-semibold px-5 py-3 rounded-2xl text-sm transition-all"

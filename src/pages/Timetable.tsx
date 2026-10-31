@@ -108,8 +108,7 @@ export default function Timetable({ ctx }: { ctx: AppCtx }) {
       { time: '9:50 AM / 10:25 AM', num: 3 },
       { time: '10:25 AM / 11:00 AM', num: 4 },
       { time: '11:00 AM / 11:25 AM', break: true, letter: 'R' },
-      { time: '11:25 AM / 12:00 PM', num: 5 },
-      { time: '12: 00 PM / 12:35 PM', num: 6 },
+      { time: '11:25 AM / 12:00 PM', num: 5 },      { time: '12:00 PM / 12:35 PM', num: 6 },
       { time: '12:35 PM / 2:00 PM', lunch: true },
       { time: '2:00 PM / 2:35 PM', num: 7 },
       { time: '2:35 PM / 4:00 PM', num: 8 },
@@ -363,9 +362,6 @@ export default function Timetable({ ctx }: { ctx: AppCtx }) {
                 <tr key={day}>
                   <td className="border border-slate-700 p-1 text-center font-bold text-red-700 bg-blue-100 text-xs">{DAY_LABELS[day]}</td>
                   {lowerPeriods.map((period, pIdx) => {
-                    if (period.fixed) {
-                      return <td key={pIdx} className="border border-slate-700 p-1 text-[8px] text-center bg-blue-50 text-slate-900 font-medium">{period.label}</td>;
-                    }
                     if (period.break) {
                       if (dayIdx === 0) {
                         return <td key={pIdx} className="border border-slate-700 p-1 text-center bg-slate-300 font-bold text-slate-900" rowSpan={5}>{lowerBreakLetters.join(' ')}</td>;

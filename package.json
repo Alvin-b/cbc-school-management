@@ -6,8 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/build-worker.mjs",
+    "build:sites": "vite build && node scripts/build-worker.mjs && node scripts/patch-worker-assets.mjs",
     "typecheck": "tsc --noEmit",
-    "worker:dev": "node scripts/build-worker.mjs && wrangler dev --config wrangler.local.jsonc",
+    "worker:dev": "node scripts/build-worker.mjs && node scripts/patch-worker-assets.mjs && wrangler dev --config wrangler.local.jsonc",
     "db:local": "wrangler d1 execute elimutrack --config wrangler.local.jsonc --local --file worker/schema.sql",
     "cap:init": "npx cap init",
     "cap:add:android": "npx cap add android",
