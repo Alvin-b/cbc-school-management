@@ -15,8 +15,10 @@ mkdirSync(MANIFEST_DIR, { recursive: true });
 
 const html = readFileSync(join(DIST, 'index.html'), 'utf8');
 
-const jsMatch = html.match(/"\/assets\/(index-[a-zA-Z0-9]+\.js)"/);
-const cssMatch = html.match(/"\/assets\/(index-[a-zA-Z0-9]+\.css)"/);
+let jsMatch = html.match(/"\/assets\/(index-[a-zA-Z0-9_-]+\.js)"/);
+let cssMatch = html.match(/"\/assets\/(index-[a-zA-Z0-9_-]+\.css)"/);
+if (!jsMatch) jsMatch = html.match(/src="[^"']*\/assets\/(index-[a-zA-Z0-9_-]+\.js)"/);
+if (!cssMatch) cssMatch = html.match(/href="[^"']*\/assets\/(index-[a-zA-Z0-9_-]+\.css)"/);
 
 if (!jsMatch || !cssMatch) {
   console.error('Could not find hashed index JS/CSS in dist/index.html');

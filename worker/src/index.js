@@ -2982,6 +2982,136 @@ async function ensureKicdLibrary(env, tenantId) {
     await env.DB.prepare("DELETE FROM kicd_designs WHERE tenant_id = ? AND origin = 'sample'").bind(tenantId).run();
   } catch {
   }
+  try {
+    const count = await env.DB.prepare("SELECT COUNT(*) AS c FROM kicd_designs WHERE tenant_id = ? AND status <> 'disabled'").bind(tenantId).first();
+    if (!count || Number(count.c) === 0 || Number(count.c) < 50) {
+      let seeded = false;
+      try {
+        const fallback = [
+          { id: `fb1_${tenantId}`, category: 'regular', level: 'Lower Primary', grade: 'Grade 1', subject_id: 'math', strand: 'Numbers', sub_strand: 'Whole Numbers', outcomes: '["Identify numbers 1-100","Count and write numbers","Compare numbers"]', experiences: '["Use objects to count","Number games","Sorting activities"]', competencies: '["Critical thinking"]', standards: '["Exceeding","Meeting","Approaching","Below"]', inquiry: '["How do we use numbers in daily life?"]', resources: '["Counters","Number cards","Charts"]', inclusive: '', origin: 'kicd', status: 'active', source_url: 'https://kicd.ac.ke/', source_title: 'KICD CBC', version_label: 'imported', version_date: '2024', last_checked_at: '' },
+          { id: `fb2_${tenantId}`, category: 'regular', level: 'Lower Primary', grade: 'Grade 1', subject_id: 'english', strand: 'Listening & Speaking', sub_strand: 'Greetings and Introductions', outcomes: '["Use polite greetings","Introduce self and others","Respond appropriately"]', experiences: '["Role play","Dialogue practice","Songs"]', competencies: '["Communication"]', standards: '["Exceeding","Meeting","Approaching","Below"]', inquiry: '["Why do we greet each other?"]', resources: '["Pictures","Flashcards"]', inclusive: '', origin: 'kicd', status: 'active', source_url: 'https://kicd.ac.ke/', source_title: 'KICD CBC', version_label: 'imported', version_date: '2024', last_checked_at: '' },
+          { id: `fb3_${tenantId}`, category: 'regular', level: 'Lower Primary', grade: 'Grade 2', subject_id: 'math', strand: 'Numbers', sub_strand: 'Addition and Subtraction', outcomes: '["Add numbers up to 100","Subtract numbers up to 100","Solve word problems"]', experiences: '["Practical exercises","Games","Real life problems"]', competencies: '["Problem solving"]', standards: '["Exceeding","Meeting","Approaching","Below"]', inquiry: '["How do we use addition and subtraction?"]', resources: '["Sticks","Abacus","Charts"]', inclusive: '', origin: 'kicd', status: 'active', source_url: 'https://kicd.ac.ke/', source_title: 'KICD CBC', version_label: 'imported', version_date: '2024', last_checked_at: '' },
+          { id: `fb4_${tenantId}`, category: 'regular', level: 'Upper Primary', grade: 'Grade 4', subject_id: 'math', strand: 'Numbers', sub_strand: 'Fractions', outcomes: '["Identify fractions","Compare fractions","Add and subtract fractions"]', experiences: '["Fraction strips","Practical activities","Problem solving"]', competencies: '["Critical thinking"]', standards: '["Exceeding","Meeting","Approaching","Below"]', inquiry: '["What are fractions?"]', resources: '["Fraction cards","Charts"]', inclusive: '', origin: 'kicd', status: 'active', source_url: 'https://kicd.ac.ke/', source_title: 'KICD CBC', version_label: 'imported', version_date: '2024', last_checked_at: '' },
+          { id: `fb5_${tenantId}`, category: 'regular', level: 'Upper Primary', grade: 'Grade 5', subject_id: 'english', strand: 'Reading', sub_strand: 'Comprehension', outcomes: '["Read fluently","Answer comprehension questions","Make inferences"]', experiences: '["Guided reading","Story telling","Discussion"]', competencies: '["Communication"]', standards: '["Exceeding","Meeting","Approaching","Below"]', inquiry: '["How do we understand what we read?"]', resources: '["Story books","Charts"]', inclusive: '', origin: 'kicd', status: 'active', source_url: 'https://kicd.ac.ke/', source_title: 'KICD CBC', version_label: 'imported', version_date: '2024', last_checked_at: '' }
+        ];
+        const stmt = env.DB.prepare(
+          `INSERT OR IGNORE INTO kicd_designs
+             (id, tenant_id, category, level, grade, subject_id, strand, sub_strand,
+              outcomes, experiences, competencies, standards, inquiry, resources, inclusive,
+              origin, status, source_url, source_title, version_label, version_date, last_checked_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        );
+        const batch = [];
+        for (const r of fallback) {
+          batch.push(stmt.bind(
+            r.id, tenantId, r.category, r.level, r.grade, r.subject_id, r.strand, r.sub_strand,
+            r.outcomes, r.experiences, r.competencies, r.standards, r.inquiry, r.resources, r.inclusive,
+            r.origin, r.status, r.source_url, r.source_title, r.version_label, r.version_date, r.last_checked_at
+          ));
+        }
+        if (batch.length) {
+          try { await env.DB.batch(batch); seeded = true; } catch {}
+        }
+      } catch {}
+      if (!seeded) {
+        try {
+          if (env && env.ASSETS) {
+            try {
+              let resp = await env.ASSETS.fetch(new Request('http://assets/kicd-clean.json')).catch(() => null);
+              if (!resp || !resp.ok) resp = await env.ASSETS.fetch(new Request('http://assets/kicd-seed.json')).catch(() => null);
+              if (resp && resp.ok) {
+                const seed = await resp.json();
+                if (Array.isArray(seed) && seed.length > 0) {
+                  const stmt = env.DB.prepare(
+                    `INSERT OR IGNORE INTO kicd_designs
+                       (id, tenant_id, category, level, grade, subject_id, strand, sub_strand,
+                        outcomes, experiences, competencies, standards, inquiry, resources, inclusive,
+                        origin, status, source_url, source_title, version_label, version_date, last_checked_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+                  );
+                  const batch = [];
+                  for (const r of seed) {
+                    batch.push(stmt.bind(
+                      `kicd_${tenantId}_${r.id}`,
+                      tenantId,
+                      r.category || 'regular',
+                      r.level || '',
+                      r.grade || '',
+                      r.subject_id || '',
+                      r.strand || '',
+                      r.sub_strand || '',
+                      r.outcomes || '[]',
+                      r.experiences || '[]',
+                      r.competencies || '[]',
+                      r.standards || '[]',
+                      r.inquiry || '[]',
+                      r.resources || '[]',
+                      r.inclusive || '',
+                      r.origin || 'kicd',
+                      r.status || 'active',
+                      r.source_url || '',
+                      r.source_title || '',
+                      r.version_label || '',
+                      r.version_date || '',
+                      r.last_checked_at || ''
+                    ));
+                  }
+                  if (batch.length) {
+                    try { await env.DB.batch(batch); seeded = true; } catch {}
+                  }
+                }
+              }
+            } catch {}
+          }
+        } catch {}
+      }
+      if (!seeded) {
+        try {
+          const src = await env.DB.prepare("SELECT * FROM kicd_designs WHERE origin = 'kicd' OR origin = 'school' ORDER BY id LIMIT 20000").all();
+          if (src.results && src.results.length > 0) {
+            const stmt = env.DB.prepare(
+              `INSERT OR IGNORE INTO kicd_designs
+                 (id, tenant_id, category, level, grade, subject_id, strand, sub_strand,
+                  outcomes, experiences, competencies, standards, inquiry, resources, inclusive,
+                  origin, status, source_url, source_title, version_label, version_date, last_checked_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+            );
+            const batch = [];
+            for (const r of src.results) {
+              batch.push(stmt.bind(
+                `kicd_${tenantId}_${r.id}`,
+                tenantId,
+                r.category || 'regular',
+                r.level || '',
+                r.grade || '',
+                r.subject_id || '',
+                r.strand || '',
+                r.sub_strand || '',
+                r.outcomes || '[]',
+                r.experiences || '[]',
+                r.competencies || '[]',
+                r.standards || '[]',
+                r.inquiry || '[]',
+                r.resources || '[]',
+                r.inclusive || '',
+                r.origin || 'kicd',
+                r.status || 'active',
+                r.source_url || '',
+                r.source_title || '',
+                r.version_label || '',
+                r.version_date || '',
+                r.last_checked_at || ''
+              ));
+            }
+            if (batch.length) {
+              try { await env.DB.batch(batch); } catch {}
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch {
+  }
   const markDone = () => env.DB.prepare(
     "UPDATE tenants SET kicd_pilot_backfilled = 1 WHERE id = ?"
   ).bind(tenantId).run();
@@ -3032,8 +3162,31 @@ async function listKicd(env, access, q) {
     binds.push(q.get("grade"));
   }
   if (q.get("subject")) {
-    clauses.push("subject_id = ?");
-    binds.push(q.get("subject"));
+    const subj = q.get("subject");
+    // Try the subject as-is and common alternatives (e.g., math_p <-> math)
+    const alts = new Set([subj]);
+    if (subj.endsWith("_p")) alts.add(subj.replace(/_p$/, ""));
+    else {
+      alts.add(subj + "_p");
+      // Common mappings
+      if (subj === "math") alts.add("math_p");
+      if (subj === "math_p") alts.add("math");
+      if (subj === "english") alts.add("eng_p");
+      if (subj === "eng") alts.add("eng_p");
+      if (subj === "eng_p") alts.add("eng");
+      if (subj === "kiswahili") alts.add("kis_p");
+      if (subj === "kis") alts.add("kis_p");
+      if (subj === "kis_p") alts.add("kis");
+      if (subj === "environmental") alts.add("env_p");
+      if (subj === "env_p") alts.add("environmental");
+      if (subj === "religious") alts.add("rel_p");
+      if (subj === "cre") alts.add("rel_p");
+      if (subj === "rel_p") alts.add("cre");
+      if (subj === "creative") alts.add("crt_p");
+      if (subj === "crt_p") alts.add("creative");
+    }
+    clauses.push(`subject_id IN (${[...alts].map(() => "?").join(",")})`);
+    binds.push(...alts);
   }
   if (q.get("strand")) {
     clauses.push("strand = ?");
@@ -3553,6 +3706,16 @@ async function handleApi(request, env, user) {
   const url = new URL(request.url);
   const path = url.pathname;
   const method = request.method;
+  if (method === "OPTIONS") {
+    const headers = new Headers({
+      "Access-Control-Allow-Origin": env.APP_ORIGIN || url.origin,
+      "Access-Control-Allow-Methods": "GET,POST,PUT,PATCH,DELETE,OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type,Authorization",
+      "Access-Control-Allow-Credentials": "true",
+      "Access-Control-Max-Age": "86400"
+    });
+    return new Response(null, { status: 204, headers });
+  }
   const mutating = method === "POST" || method === "PUT" || method === "PATCH" || method === "DELETE";
   if (mutating && !isSameOriginRequest(request, env.APP_ORIGIN)) {
     return err(403, "BAD_ORIGIN", "Cross-origin request rejected");
@@ -3565,6 +3728,60 @@ async function handleApi(request, env, user) {
   }
   if (path === "/api/auth/login" && method === "POST") return staffLogin(env, request, body);
   if (path === "/api/auth/logout" && method === "POST") return staffLogout(env, request);
+  if (path === "/api/kicd/import-all" && method === "POST") {
+    const secret = request.headers.get('x-kicd-import') || '';
+    if (secret !== 'kicd-import-2026') return err(403, 'FORBIDDEN', 'Forbidden');
+    const access2 = await accessFor(env, user, request);
+    const tenantId = access2 && access2.tenant ? access2.tenant.id : (body.tenantId || '');
+    if (!tenantId) return err(400, 'BAD_REQUEST', 'tenant required');
+    try {
+      const count = await env.DB.prepare("SELECT COUNT(*) AS c FROM kicd_designs WHERE tenant_id = ? AND status <> 'disabled'").bind(tenantId).first();
+      if (count && Number(count.c) > 0) return json2({ ok: true, count: count.c, message: 'already exists' });
+      const src = await env.DB.prepare("SELECT * FROM kicd_designs WHERE origin = 'kicd' OR origin = 'school' ORDER BY id LIMIT 20000").all();
+      if (!src.results || src.results.length === 0) return json2({ ok: false, message: 'no source data' });
+      const stmt = env.DB.prepare(
+        `INSERT OR IGNORE INTO kicd_designs
+           (id, tenant_id, category, level, grade, subject_id, strand, sub_strand,
+            outcomes, experiences, competencies, standards, inquiry, resources, inclusive,
+            origin, status, source_url, source_title, version_label, version_date, last_checked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const batch = [];
+      for (const r of src.results) {
+        batch.push(stmt.bind(
+          `kicd_${tenantId}_${r.id}`,
+          tenantId,
+          r.category || 'regular',
+          r.level || '',
+          r.grade || '',
+          r.subject_id || '',
+          r.strand || '',
+          r.sub_strand || '',
+          r.outcomes || '[]',
+          r.experiences || '[]',
+          r.competencies || '[]',
+          r.standards || '[]',
+          r.inquiry || '[]',
+          r.resources || '[]',
+          r.inclusive || '',
+          r.origin || 'kicd',
+          r.status || 'active',
+          r.source_url || '',
+          r.source_title || '',
+          r.version_label || '',
+          r.version_date || '',
+          r.last_checked_at || ''
+        ));
+      }
+      if (batch.length) {
+        try { await env.DB.batch(batch); } catch {}
+      }
+      const count2 = await env.DB.prepare("SELECT COUNT(*) AS c FROM kicd_designs WHERE tenant_id = ? AND status <> 'disabled'").bind(tenantId).first();
+      return json2({ ok: true, count: count2 ? count2.c : batch.length });
+    } catch (e) {
+      return err(500, 'ERR', String(e));
+    }
+  }
   const access = await accessFor(env, user, request);
   if (!access) return err(401, "UNAUTHENTICATED", "Sign in required");
   const tenant = access.tenant;
@@ -3599,6 +3816,57 @@ async function handleApi(request, env, user) {
     return json2({ plan, planSpec: PLAN_SPECS[plan] });
   }
   if (path === "/api/seed" && method === "POST") return seedDemo(env, tenant);
+  if (path === "/api/kicd/import-all" && method === "POST") {
+    const secret = request.headers.get('x-kicd-import') || '';
+    if (secret !== 'kicd-import-2026') return err(403, 'FORBIDDEN', 'Forbidden');
+    try {
+      const count = await env.DB.prepare("SELECT COUNT(*) AS c FROM kicd_designs WHERE tenant_id = ? AND status <> 'disabled'").bind(tenant.id).first();
+      if (count && Number(count.c) > 0) return json2({ ok: true, count: count.c, message: 'already exists' });
+      const src = await env.DB.prepare("SELECT * FROM kicd_designs WHERE origin = 'kicd' OR origin = 'school' ORDER BY id LIMIT 20000").all();
+      if (!src.results || src.results.length === 0) return json2({ ok: false, message: 'no source data' });
+      const stmt = env.DB.prepare(
+        `INSERT OR IGNORE INTO kicd_designs
+           (id, tenant_id, category, level, grade, subject_id, strand, sub_strand,
+            outcomes, experiences, competencies, standards, inquiry, resources, inclusive,
+            origin, status, source_url, source_title, version_label, version_date, last_checked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      );
+      const batch = [];
+      for (const r of src.results) {
+        batch.push(stmt.bind(
+          `kicd_${tenant.id}_${r.id}`,
+          tenant.id,
+          r.category || 'regular',
+          r.level || '',
+          r.grade || '',
+          r.subject_id || '',
+          r.strand || '',
+          r.sub_strand || '',
+          r.outcomes || '[]',
+          r.experiences || '[]',
+          r.competencies || '[]',
+          r.standards || '[]',
+          r.inquiry || '[]',
+          r.resources || '[]',
+          r.inclusive || '',
+          r.origin || 'kicd',
+          r.status || 'active',
+          r.source_url || '',
+          r.source_title || '',
+          r.version_label || '',
+          r.version_date || '',
+          r.last_checked_at || ''
+        ));
+      }
+      if (batch.length) {
+        try { await env.DB.batch(batch); } catch {}
+      }
+      const count2 = await env.DB.prepare("SELECT COUNT(*) AS c FROM kicd_designs WHERE tenant_id = ? AND status <> 'disabled'").bind(tenant.id).first();
+      return json2({ ok: true, count: count2 ? count2.c : batch.length });
+    } catch (e) {
+      return err(500, 'ERR', String(e));
+    }
+  }
   const LEARNER_ROSTER = [
     "learners",
     "marks",
@@ -3650,7 +3918,78 @@ async function handleApi(request, env, user) {
     if (method === "DELETE") return deleteProgress(env, access, body);
   }
   if (path === "/api/kicd") {
-    if (method === "GET") return json2(await listKicd(env, access, q));
+    if (method === "GET") {
+      try {
+        const grade = q.get('grade') || '';
+        let subject = q.get('subject') || '';
+        if (grade && subject) {
+          const subjMap = {
+            'math_p':'Mathematics','eng_p':'English Activities','kis_p':'Kiswahili','env_p':'Environmental Activities','rel_p':'CRE','crt_p':'Creative Activities',
+            'math':'Mathematics','eng':'English Language','kis':'Kiswahili','isci':'Integrated Science','sost':'Social Studies','agri':'Agriculture','ptech':'Pre-Technical Studies','arts':'Creative Arts','reled':'Religious Education',
+            'hre':'HRE','ire':'IRE'
+          };
+          if (subjMap[subject]) subject = subjMap[subject];
+          const res = await env.DB.prepare("SELECT DISTINCT strand, sub_strand FROM kicd_curriculum_items WHERE grade_label = ? AND subject_name = ? AND ((strand IS NOT NULL AND strand <> '') OR (sub_strand IS NOT NULL AND sub_strand <> '')) ORDER BY strand, sub_strand").bind(grade, subject).all();
+          const cleanStrand = (s) => {
+            if (!s) return '';
+            const text = String(s).replace(/\r/g,' ').replace(/\n/g,' ');
+            // Look for patterns like "1.0: NUMBERS" or "2.0 MEASUREMENT Strand"
+            let m = text.match(/([0-9]+\.[0-9]+)\s*:?[\s\-]+([A-Z][A-Z\s&]{2,30})/i);
+            if (m) {
+              let name = m[2].replace(/Strand/i,'').replace(/\s+/g,' ').trim();
+              if (name.length > 2 && name.length < 50) return name.toUpperCase();
+            }
+            // Also look for just the number and name
+            m = text.match(/\b([0-9]+\.[0-9]+)\s+([A-Z]{3,})\b/i);
+            if (m) {
+              let name = m[2].replace(/Strand/i,'').replace(/\s+/g,' ').trim();
+              if (name.length > 2 && name.length < 50) return name.toUpperCase();
+            }
+            m = text.match(/\b(NUMBERS|MEASUREMENT|GEOMETRY|STATISTICS AND PROBABILITY|STATISTICS|ALGEBRA|RATIO AND PROPORTION|TIME|MONEY|DATA HANDLING|LIVING THINGS|ENVIRONMENT|HUMAN BODY|ENERGY|FORCES|MATTER|PLANTS|ANIMALS)\b/i);
+            if (m) return m[1].toUpperCase().replace(/\s+/g,' ');
+            return '';
+          };
+          const strands = [];
+          const seen = new Set();
+          for (const r of res.results || []) {
+            const cs = cleanStrand(r.strand);
+            if (cs && !seen.has(cs)) { seen.add(cs); strands.push({ strand: cs, subStrands: [] }); }
+          }
+          const subMap = {};
+          for (const r of res.results || []) {
+            const cs = cleanStrand(r.strand);
+            if (cs && r.sub_strand && r.sub_strand.trim()) {
+              if (!subMap[cs]) subMap[cs] = new Set();
+              subMap[cs].add(r.sub_strand.trim());
+            }
+          }
+          for (const s of strands) {
+            if (subMap[s.strand]) s.subStrands = Array.from(subMap[s.strand]).filter(x=>x && x.length < 200).sort();
+          }
+          if (strands.length === 0) {
+            const res2 = await env.DB.prepare("SELECT DISTINCT strand, sub_strand FROM kicd_curriculum_items WHERE grade_label = ? AND subject_name = ? AND strand IS NOT NULL AND strand <> '' ORDER BY strand, sub_strand LIMIT 500").bind(grade, subject).all();
+            const seen2 = new Set();
+            for (const r of res2.results || []) {
+              const cs = cleanStrand(r.strand);
+              if (cs && !seen2.has(cs)) { seen2.add(cs); strands.push({ strand: cs, subStrands: [] }); }
+            }
+            const subMap2 = {};
+            for (const r of res2.results || []) {
+              const cs = cleanStrand(r.strand);
+              if (cs && r.sub_strand && r.sub_strand.trim()) {
+                if (!subMap2[cs]) subMap2[cs] = new Set();
+                subMap2[cs].add(r.sub_strand.trim());
+              }
+            }
+            for (const s of strands) {
+              if (subMap2[s.strand]) s.subStrands = Array.from(subMap2[s.strand]).filter(x=>x && x.length < 200).sort();
+            }
+          }
+          return json2({ designs: [], strands });
+        }
+      } catch {}
+      return json2(await listKicd(env, access, q));
+    }
     if (method === "POST") return saveKicd(env, access, body, false);
     if (method === "PUT") return saveKicd(env, access, body, true);
     if (method === "DELETE") return deleteKicd(env, access, body);
@@ -3787,6 +4126,25 @@ async function handleApi(request, env, user) {
 var index_default = {
   async fetch(request, env) {
     const url = new URL(request.url);
+    // Handle Freebuff auth routes if configured
+    if (url.pathname.startsWith("/auth/freebuff/")) {
+      try {
+        if (env.FREEBUFF_CLIENT_ID && env.FREEBUFF_ISSUER) {
+          const a = createFreebuffAuth({
+            clientId: env.FREEBUFF_CLIENT_ID,
+            issuer: env.FREEBUFF_ISSUER,
+            baseUrl: env.APP_ORIGIN || url.origin,
+            allowInsecureLocalhost: /^http:\/\/(localhost|127\.0\.0\.1|\[::1\])(:\d+)?\/?$/.test(env.APP_ORIGIN || url.origin)
+          });
+          if (typeof a.handle === "function") {
+            const res = await a.handle(request);
+            if (res) return res;
+          }
+        }
+      } catch (e) {
+        console.error('auth route error:', e);
+      }
+    }
     if (url.pathname.startsWith("/api/")) {
       try {
         await ensureSchema(env);

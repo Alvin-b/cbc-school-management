@@ -53,6 +53,7 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
   const [draft, setDraft] = useState<Draft | null>(null);
   const [saving, setSaving] = useState(false);
   const [designs, setDesigns] = useState<KicdDesign[]>([]);
+  const [strandsList, setStrandsList] = useState<Array<{strand: string, subStrands: string[]}>>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -92,9 +93,11 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
     }
     let cancelled = false;
     setCoverageLoading(true);
+    const gradeMatch = filterStream.match(/Grade\s*(\d+)/i);
+    const grade = gradeMatch ? `Grade ${gradeMatch[1]}` : filterStream;
     api
       .get<{ designs: KicdDesign[] }>(
-        `/api/kicd?category=regular&level=${encodeURIComponent(levelOf(filterStream))}` +
+        `/api/kicd?grade=${encodeURIComponent(grade)}` +
           `&subject=${encodeURIComponent(filterSubject)}`,
       )
       .then((r) => { if (!cancelled) setCoverageDesigns(r.designs || []); })
@@ -182,11 +185,14 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
 
   const fetchDesigns = async (stream: string, subjectId: string) => {
     try {
-      const res = await api.get<{ designs: KicdDesign[] }>(
-        `/api/kicd?category=regular&level=${encodeURIComponent(levelOf(stream))}&subject=${encodeURIComponent(subjectId)}`,
+      const gradeMatch = stream.match(/Grade\s*(\d+)/i);
+      const grade = gradeMatch ? `Grade ${gradeMatch[1]}` : stream;
+      const res = await api.get<{ designs: KicdDesign[], strands?: Array<{strand: string, subStrands: string[]}> }>(
+        `/api/kicd?grade=${encodeURIComponent(grade)}&subject=${encodeURIComponent(subjectId)}`,
       );
-      setDesigns(res.designs);
-    } catch { setDesigns([]); }
+      setDesigns(res.designs || []);
+      setStrandsList(res.strands || []);
+    } catch { setDesigns([]); setStrandsList([]); }
   };
 
   const save = async () => {
@@ -301,46 +307,38 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
 
       {error && <ErrorNote message={error} />}
 
-      <Panel title="Curriculum outcome coverage" icon={<Target className="w-4 h-4" />}>
+      <Panel title="All strands from KICD database - Select to create schemes of work" icon={<BookOpen className="w-4 h-4" />}>
         {!coverageScope ? (
           <EmptyState
-            icon={<Target className="w-6 h-6" />}
-            title="Pick a class and a learning area"
-            hint="Choose one class and one learning area in the filters above to compare your scheme rows against the curriculum outcomes for that grade."
+            icon={<BookOpen className="w-6 h-6" />}
+            title="Select class and learning area"
+            hint="Choose Grade/Class and Subject above. All strands for that grade and subject will be loaded from the KICD database for you to select."
           />
         ) : coverageLoading ? (
-          <Loading label="Loading curriculum outcomes" />
+          <Loading label="Loading all strands from KICD database" />
         ) : coverageDesigns.length === 0 ? (
           <EmptyState
-            icon={<Target className="w-6 h-6" />}
-            title="No designs for this combination"
-            hint="Add a KICD design for this level and learning area under KICD Designs to track coverage."
+            icon={<BookOpen className="w-6 h-6" />}
+            title="No strands found"
+            hint="No strands found in the KICD database for this grade and subject combination."
           />
         ) : (
-          <div className="space-y-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="font-mono text-lg font-bold text-white">
-                {coverageTotals.done}/{coverageTotals.total}
-              </span>
-              <span className="text-xs text-slate-400">
-                outcomes planned in schemes for {filterStream} · {subjectName(filterSubject)}
-                {filterTerm ? ` · ${filterTerm}` : ''}
-              </span>
-              <div className="h-2 flex-1 min-w-[120px] overflow-hidden rounded-full bg-slate-800">
-                <div
-                  className="h-full rounded-full bg-emerald-500 transition-all"
-                  style={{
-                    width: `${coverageTotals.total ? Math.round((coverageTotals.done / coverageTotals.total) * 100) : 0}%`,
-                  }}
-                />
-              </div>
+          <div className="space-y-3">
+            <div className="text-xs text-slate-400">
+              {coverageDesigns.length} strand{coverageDesigns.length !== 1 ? 's' : ''} loaded from KICD database for {filterStream} · {subjectName(filterSubject)}. Click on any strand to create a scheme of work row for it.
             </div>
-
-            {coverageDesigns.map((d) => (
-              <div key={d.id} className="rounded-2xl border border-slate-800 bg-slate-950 p-4">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-sm font-semibold text-white">
-                    {d.strand}{d.subStrand ? ` → ${d.subStrand}` : ''}
+            {coverageDesigns.map((d, idx) => (
+              <div key={`${d.id}-${idx}`} className="rounded-2xl border border-slate-700 bg-slate-950 p-4 hover:border-indigo-500/50 transition-colors">
+                <div className="flex flex-wrap items-start justify-between gap-2 mb-2">
+                  <div className="flex-1">
+                    <div className="text-sm font-semibold text-white mb-1">
+                      Strand: {d.strand}
+                    </div>
+                    {d.subStrand && (
+                      <div className="text-xs text-slate-300">
+                        Sub-strand: {d.subStrand}
+                      </div>
+                    )}
                   </div>
                   <span className={`rounded border px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wide ${
                     d.origin === 'kicd'
@@ -349,22 +347,47 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
                         ? 'border-amber-500/30 bg-amber-500/10 text-amber-300'
                         : 'border-sky-500/30 bg-sky-500/10 text-sky-300'
                   }`}>
-                    {d.origin === 'kicd' ? 'Official KICD' : d.origin === 'sample' ? 'Sample data' : 'School entered'}
+                    {d.origin === 'kicd' ? 'Official KICD' : d.origin === 'sample' ? 'Sample' : 'School'}
                   </span>
                 </div>
-                <ul className="mt-2 space-y-1.5">
-                  {d.outcomes.filter((o) => o.trim()).map((o, i) => {
-                    const done = isCovered(o);
-                    return (
-                      <li key={`${d.id}-${i}`} className="flex items-start gap-2 text-[11px] leading-relaxed">
-                        <span className={`mt-0.5 shrink-0 ${done ? 'text-emerald-400' : 'text-slate-600'}`}>
-                          {done ? <Check className="h-3.5 w-3.5" /> : <Circle className="h-3.5 w-3.5" />}
-                        </span>
-                        <span className={done ? 'text-slate-300' : 'text-slate-500'}>{o}</span>
-                      </li>
-                    );
-                  })}
-                </ul>
+                {d.outcomes && d.outcomes.filter((o) => o.trim()).length > 0 && (
+                  <div className="mt-2 mb-3">
+                    <div className="text-[10px] text-slate-500 uppercase tracking-wide mb-1">Learning Outcomes</div>
+                    <ul className="space-y-1">
+                      {d.outcomes.filter((o) => o.trim()).slice(0, 3).map((o, i) => (
+                        <li key={`${d.id}-${i}`} className="text-[11px] text-slate-400 leading-relaxed">
+                          • {o}
+                        </li>
+                      ))}
+                      {d.outcomes.filter((o) => o.trim()).length > 3 && (
+                        <li className="text-[10px] text-slate-500 italic">
+                          +{d.outcomes.filter((o) => o.trim()).length - 3} more outcomes
+                        </li>
+                      )}
+                    </ul>
+                  </div>
+                )}
+                <button
+                  className={`${btnPrimary} w-full justify-center`}
+                  onClick={() => {
+                    setDraft({
+                      stream: filterStream,
+                      subjectId: filterSubject,
+                      term: filterTerm || defaultTerm(),
+                      week: 1,
+                      strand: d.strand,
+                      subStrand: d.subStrand || '',
+                      outcomes: (d.outcomes || []).join('\n'),
+                      experiences: (d.experiences || []).join('\n'),
+                      inquiry: (d.inquiry || []).join('\n'),
+                      resources: (d.resources || []).join(', '),
+                      assessment: (d.standards || []).join(', '),
+                      remarks: '',
+                    });
+                  }}
+                >
+                  <Plus className="w-4 h-4" /> Create Scheme of Work for this Strand
+                </button>
               </div>
             ))}
           </div>
@@ -470,7 +493,7 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
               </div>
             </div>
 
-            {!draft.id && designs.length > 0 && (
+            {!draft.id && (strandsList.length > 0 || designs.length > 0) && (
               <div className="space-y-3 p-3 bg-slate-900/50 rounded-xl border border-slate-700">
                 <div className="flex items-center gap-2">
                   <BookOpen className="w-4 h-4 text-indigo-400" />
@@ -488,7 +511,7 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
                       }}
                     >
                       <option value="">Select Strand</option>
-                      {[...new Set(designs.map(d => d.strand).filter(Boolean))].map(s => (
+                      {(strandsList.length > 0 ? strandsList.map(s => s.strand) : [...new Set(designs.map(d => d.strand).filter(Boolean))]).map(s => (
                         <option key={s} value={s}>{s}</option>
                       ))}
                     </select>
@@ -501,26 +524,33 @@ export default function Schemes({ ctx }: { ctx: AppCtx }) {
                       onChange={(e) => {
                         const subStrand = e.target.value;
                         setDraft({ ...draft, subStrand });
-                        const matching = designs.find(d => d.strand === draft.strand && d.subStrand === subStrand);
-                        if (matching) {
-                          void loadDesign(matching.id);
+                        if (strandsList.length === 0) {
+                          const matching = designs.find(d => d.strand === draft.strand && d.subStrand === subStrand);
+                          if (matching) {
+                            void loadDesign(matching.id);
+                          }
                         }
                       }}
                       disabled={!draft.strand}
                     >
                       <option value="">Select Sub-Strand</option>
-                      {designs
-                        .filter(d => !draft.strand || d.strand === draft.strand)
-                        .map(d => d.subStrand)
-                        .filter(Boolean)
-                        .filter((v, i, arr) => arr.indexOf(v) === i)
-                        .map(s => (
+                      {strandsList.length > 0 ? 
+                        (strandsList.find(s => s.strand === draft.strand)?.subStrands || []).map(s => (
                           <option key={s} value={s}>{s}</option>
-                        ))}
+                        ))
+                        : designs
+                          .filter(d => !draft.strand || d.strand === draft.strand)
+                          .map(d => d.subStrand)
+                          .filter(Boolean)
+                          .filter((v, i, arr) => arr.indexOf(v) === i)
+                          .map(s => (
+                            <option key={s} value={s}>{s}</option>
+                          ))
+                      }
                     </select>
                   </div>
                 </div>
-                <p className="text-[10px] text-slate-500">Select strand and sub-strand from KICD to auto-fill learning outcomes, experiences, inquiry questions, resources and assessment.</p>
+                <p className="text-[10px] text-slate-500">Select strand and sub-strand from KICD to use for your scheme of work.</p>
               </div>
             )}
 
